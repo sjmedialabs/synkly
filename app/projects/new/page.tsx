@@ -8,15 +8,18 @@ import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { ArrowLeft, ArrowRight, Check } from 'lucide-react'
+type DepartmentSource = 'master_table' | 'users_text'
 
 type Department = {
   id: string
   name: string
+  description?: string | null
+  source: DepartmentSource
 }
 
 type TeamLead = {
   id: string
-  full_name: string
+  full_name: string | null
   email: string
 }
 
@@ -33,7 +36,7 @@ export default function NewProjectPage() {
   const [currentStep, setCurrentStep] = useState(1)
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
-  const [userRole, setUserRole] = useState<string | null>(null)
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
 
   // Data
   const [departments, setDepartments] = useState<Department[]>([])
@@ -54,57 +57,108 @@ export default function NewProjectPage() {
 
   useEffect(() => {
     const fetchData = async () => {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
-        router.push('/auth/login')
-        return
+      try {
+        const { data: { user } } = await supabase.auth.getUser()
+        if (!user) {
+          router.push('/auth/login')
+          return
+        }
+
+        setCurrentUserId(user.id)
+
+        // Preferred source: departments master table
+        const { data: departmentsData, error: departmentsError } = await supabase
+          .from('departments')
+          .select('id, name')
+          .order('name')
+
+        if (!departmentsError && departmentsData && departmentsData.length > 0) {
+          setDepartments(
+            departmentsData.map((department) => ({
+              id: department.id,
+              name: department.name,
+              source: 'master_table' as const,
+            }))
+          )
+          return
+        }
+
+        // Fallback source: distinct department names from legacy users table
+        const { data: usersData, error: usersError } = await supabase
+          .from('users')
+          .select('department')
+          .eq('is_active', true)
+          .not('department', 'is', null)
+
+        if (usersError) throw usersError
+
+        const uniqueDepartments = Array.from(
+          new Set(
+            (usersData || [])
+              .map((user) => user.department)
+              .filter((department): department is string => Boolean(department))
+          )
+        ).sort((a, b) => a.localeCompare(b))
+
+        setDepartments(
+          uniqueDepartments.map((department) => ({
+            id: department,
+            name: department,
+            source: 'users_text' as const,
+          }))
+        )
+      } catch (error) {
+        console.error('Error loading project setup data:', error)
+        setDepartments([])
+      } finally {
+        setLoading(false)
       }
-
-      // Check user role - now using designation_id instead of role_id
-      const { data: userData } = await supabase
-        .from('users')
-        .select('designation_id')
-        .eq('id', user.id)
-        .single()
-
-      setUserRole(userData?.designation_id || null)
-
-      // Fetch departments from departments table
-      const { data: departmentsData } = await supabase
-        .from('departments')
-        .select('id, name')
-        .order('name')
-
-      setDepartments(departmentsData || [])
-      setLoading(false)
     }
 
     fetchData()
   }, [router, supabase])
 
-  const fetchTeamLeads = async (departmentId: string) => {
-    // Fetch team leads in this department (users with "Team Lead" designation)
-    const { data } = await supabase
+  const fetchTeamLeads = async (department: Department) => {
+    // Primary query for normalized schema
+    if (department.source === 'master_table') {
+      const { data, error } = await supabase
+        .from('users')
+        .select('id, full_name, email')
+        .eq('department_id', department.id)
+        .eq('is_active', true)
+        .order('full_name')
+
+      if (!error && data && data.length > 0) {
+        setTeamLeads(data)
+        return
+      }
+
+      if (error) {
+        console.warn('department_id query failed, falling back to text department:', error.message)
+      }
+    }
+
+    // Fallback query for legacy schema
+    const { data: legacyData, error: legacyError } = await supabase
       .from('users')
-      .select('id, full_name, email, designation_id')
-      .eq('department_id', departmentId)
+      .select('id, full_name, email')
+      .eq('department', department.name)
       .eq('is_active', true)
       .order('full_name')
 
-    // Filter for Team Lead designation (you may need to adjust this based on your data)
-    const teamLeads = (data || []).filter(u => {
-      // If you have the actual Team Lead designation ID, filter by that
-      // For now, we'll include all and filter by name matching
-      return true // Include all for now, filter client-side if needed
-    })
+    if (legacyError) {
+      console.error('Legacy department query failed:', legacyError)
+      setTeamLeads([])
+      return
+    }
 
-    setTeamLeads(teamLeads)
+    setTeamLeads(legacyData || [])
   }
 
   const handleDepartmentSelect = async (department: Department) => {
     setSelectedDepartment(department)
     setSelectedTeamLead(null) // Reset team lead when department changes
-    await fetchTeamLeads(department.id)
+    await fetchTeamLeads(department)
   }
 
   const handleNext = () => {
@@ -137,24 +191,86 @@ export default function NewProjectPage() {
 
     setCreating(true)
     try {
-      const { data, error } = await supabase
+      const basePayload: Record<string, unknown> = {
+        name: projectData.name.trim(),
+        description: projectData.description.trim() || null,
+        priority: projectData.priority,
+        status: 'active',
+      }
+
+      const modernPayload: Record<string, unknown> = {
+        ...basePayload,
+        team_lead_id: selectedTeamLead.id,
+        onboarded_date: projectData.onboarded_date || null,
+        assigned_date: projectData.assigned_date || null,
+        projected_end_date: projectData.projected_end_date || null,
+        inputs: projectData.inputs ? { notes: projectData.inputs } : {},
+      }
+
+      if (selectedDepartment.source === 'master_table') {
+        modernPayload.department_id = selectedDepartment.id
+      }
+
+      let { data, error } = await supabase
         .from('projects')
-        .insert([{
-          name: projectData.name.trim(),
-          description: projectData.description.trim() || null,
-          priority: projectData.priority,
-          status: 'active',
-          department_id: selectedDepartment.id,
-          team_lead_id: selectedTeamLead.id,
-          onboarded_date: projectData.onboarded_date || null,
-          assigned_date: projectData.assigned_date || null,
-          projected_end_date: projectData.projected_end_date || null,
-          inputs: projectData.inputs ? { notes: projectData.inputs } : {},
-        }])
-        .select()
+        .insert([modernPayload])
+        .select('id')
         .single()
 
-      if (error) throw error
+      // Fallback for legacy schema
+      if (error || !data) {
+        console.warn('Modern project insert failed, trying legacy insert:', error?.message)
+        const legacyPayload: Record<string, unknown> = {
+          ...basePayload,
+          project_lead_id: selectedTeamLead.id,
+          start_date: projectData.assigned_date || projectData.onboarded_date || null,
+          end_date: projectData.projected_end_date || null,
+        }
+
+        if (currentUserId) {
+          legacyPayload.created_by = currentUserId
+        }
+
+        const legacyResult = await supabase
+          .from('projects')
+          .insert([legacyPayload])
+          .select('id')
+          .single()
+
+        data = legacyResult.data
+        error = legacyResult.error
+      }
+
+      // Last-resort fallback: minimal insert
+      if (error || !data) {
+        console.warn('Legacy project insert failed, trying minimal insert:', error?.message)
+        const minimalResult = await supabase
+          .from('projects')
+          .insert([basePayload])
+          .select('id')
+          .single()
+
+        data = minimalResult.data
+        error = minimalResult.error
+      }
+
+      if (error || !data) throw error || new Error('Failed to create project')
+
+      // Best-effort: attach selected lead to project members
+      const { error: projectUserError } = await supabase
+        .from('project_users')
+        .upsert(
+          {
+            project_id: data.id,
+            user_id: selectedTeamLead.id,
+            role: 'lead',
+          },
+          { onConflict: 'project_id,user_id' }
+        )
+
+      if (projectUserError) {
+        console.warn('Unable to link team lead in project_users:', projectUserError.message)
+      }
 
       router.push(`/projects/${data.id}`)
     } catch (error: any) {

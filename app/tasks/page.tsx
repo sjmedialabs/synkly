@@ -4,8 +4,6 @@ import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { DashboardLayout } from '@/components/layout/dashboard-layout'
-import { Button } from '@/components/ui/button'
-import { Plus, X } from 'lucide-react'
 import { SmartAssignModal } from '@/components/tasks/smart-assign-modal'
 
 type Task = {
@@ -18,6 +16,7 @@ type Task = {
   assignee_id: string | null
   project_id: string | null
   module_id: string | null
+  estimated_hours?: number | null
   sprint_id: string | null
   carried_from_sprint_id: string | null
   due_date: string | null
@@ -34,10 +33,6 @@ type Task = {
   } | null
 }
 
-type Project = {
-  id: string
-  name: string
-}
 
 type TeamMember = {
   id: string
@@ -48,7 +43,6 @@ type TeamMember = {
 export default function TasksPage() {
   const supabase = createClient()
   const router = useRouter()
-  const [user, setUser] = useState<any>(null)
   const [userRole, setUserRole] = useState<string | null>(null)
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
@@ -69,7 +63,6 @@ export default function TasksPage() {
         router.push('/auth/login')
         return
       }
-      setUser(user)
 
       // Fetch user's role
       const { data: userData } = await supabase
@@ -363,26 +356,39 @@ export default function TasksPage() {
                   month: new Date().toISOString().slice(0, 7)
                 })
               })
+              const result = await response.json()
 
               if (!response.ok) {
-                const error = await response.json()
-                throw new Error(error.error || 'Failed to assign task')
+                throw new Error(result.error || 'Failed to assign task')
               }
 
-              const { task } = await response.json()
+              const updatedTask = result.task as Task
 
               // Update local state
               const assignee = teamMembers.find(m => m.id === employeeId)
-              setTasks(tasks.map(t => 
-                t.id === selectedTaskForAssign.id 
-                  ? { ...t, assignee_id: employeeId, assignee: assignee ? { full_name: assignee.full_name, email: assignee.email } : null, sprint_id: sprintId } 
-                  : t
-              ))
+              setTasks((prevTasks) =>
+                prevTasks.map((task) =>
+                  task.id === selectedTaskForAssign.id
+                    ? {
+                        ...task,
+                        assignee_id: employeeId,
+                        assignee: assignee ? { full_name: assignee.full_name, email: assignee.email } : null,
+                        estimated_hours: updatedTask?.estimated_hours ?? estimatedHours,
+                        sprint_id: updatedTask?.sprint_id ?? null,
+                        carried_from_sprint_id: updatedTask?.carried_from_sprint_id ?? task.carried_from_sprint_id,
+                      }
+                    : task
+                )
+              )
+
+              if (result.sprintAssignmentSkipped) {
+                alert('Task was assigned successfully, but sprint could not be updated. Please run the latest sprint migration to fully enable sprint assignments.')
+              }
               setShowAssignModal(false)
               setSelectedTaskForAssign(null)
             } catch (error: any) {
               console.error('Error assigning task:', error)
-              alert('Error assigning task: ' + error.message)
+              throw error
             }
           }}
         />

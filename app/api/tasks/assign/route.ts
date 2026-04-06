@@ -174,12 +174,32 @@ export async function POST(request: NextRequest) {
 
     console.log('[v0 task assign] Final update data:', updateData)
 
-    const { data: updatedTask, error: updateError } = await supabase
+    let { data: updatedTask, error: updateError } = await supabase
       .from('tasks')
       .update(updateData)
       .eq('id', taskId)
       .select()
       .single()
+    let sprintAssignmentSkipped = false
+
+    // Some environments still have a legacy sprint FK target; keep assignment working even if sprint cannot be written.
+    if (updateError?.code === '23503' && updateData.sprint_id) {
+      console.warn('[v0 task assign] Sprint FK mismatch detected; retrying assignment without sprint_id')
+      const retryUpdateData = { ...updateData }
+      delete retryUpdateData.sprint_id
+      delete retryUpdateData.carried_from_sprint_id
+
+      const retryResult = await supabase
+        .from('tasks')
+        .update(retryUpdateData)
+        .eq('id', taskId)
+        .select()
+        .single()
+
+      updatedTask = retryResult.data
+      updateError = retryResult.error
+      sprintAssignmentSkipped = !retryResult.error
+    }
 
     console.log('[v0 task assign] Update result:', { success: !!updatedTask, error: updateError?.message, code: updateError?.code })
 
@@ -235,7 +255,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ 
       success: true, 
       task: updatedTask,
-      carriedFromSprint: carriedFromSprintId ? true : false
+      carriedFromSprint: carriedFromSprintId ? !sprintAssignmentSkipped : false,
+      sprintAssignmentSkipped
     })
   } catch (err) {
     console.error('Assign task error:', err)

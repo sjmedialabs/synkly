@@ -34,7 +34,7 @@ type Task = {
 type SmartAssignModalProps = {
   task: Task
   onClose: () => void
-  onAssign: (employeeId: string, estimatedHours: number, sprintId: string) => void
+  onAssign: (employeeId: string, estimatedHours: number, sprintId: string) => Promise<void>
 }
 
 export function SmartAssignModal({ task, onClose, onAssign }: SmartAssignModalProps) {
@@ -102,8 +102,12 @@ export function SmartAssignModal({ task, onClose, onAssign }: SmartAssignModalPr
         count: data.sprints?.length || 0,
         sprints: data.sprints?.map((s: any) => s.sprint_name) || []
       })
-      
-      setSprints(data.sprints || [])
+
+      const sprintList: Sprint[] = data.sprints || []
+      setSprints(sprintList)
+      setSelectedSprint((currentSprintId) =>
+        sprintList.some((sprint) => sprint.id === currentSprintId) ? currentSprintId : ''
+      )
     } catch (error) {
       console.error('[v0] Error fetching sprints:', error)
       setSprints([])
@@ -114,6 +118,10 @@ export function SmartAssignModal({ task, onClose, onAssign }: SmartAssignModalPr
 
   const handleAssign = async () => {
     if (!selectedEmployee || !selectedSprint) return
+    if (!sprints.some((sprint) => sprint.id === selectedSprint)) {
+      setError('The selected sprint is no longer available. Please choose another sprint.')
+      return
+    }
     setAssigning(true)
     setError(null)
     try {
