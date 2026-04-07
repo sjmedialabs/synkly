@@ -1,18 +1,16 @@
-import { createClient } from '@/lib/supabase/server'
+import { getAdminClient, getAuthContext } from '@/lib/rbac-server'
 import { NextRequest, NextResponse } from 'next/server'
-import { getAuthContext } from '@/lib/rbac-server'
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createClient()
-    const authContext = await getAuthContext(supabase)
+    const authContext = await getAuthContext()
 
-    if (!authContext.user) {
+    if (!authContext.userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
     // Only client_admin can invite users
-    if (authContext.role !== 'client_admin') {
+    if (!authContext.isClientAdmin) {
       return NextResponse.json({ error: 'Only client admins can invite users' }, { status: 403 })
     }
 
@@ -28,6 +26,8 @@ export async function POST(request: NextRequest) {
     if (!allowedRoles.includes(role)) {
       return NextResponse.json({ error: 'Invalid role' }, { status: 400 })
     }
+
+    const supabase = getAdminClient()
 
     // Get role ID
     const { data: roleData, error: roleError } = await supabase
@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
       user_metadata: {
         role: role,
         invited_at: new Date().toISOString(),
-        invited_by: authContext.user.id,
+        invited_by: authContext.userId,
         client_id: authContext.clientId,
       },
     })
