@@ -1,11 +1,26 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
+import { hasPermission, isFullAccessRole, resolveRole } from '@/lib/rbac'
 
 const RESTRICTED_DESIGNATIONS = ['Super Admin', 'Delivery Manager']
 
 export async function GET(request: NextRequest) {
   try {
     const supabase = await createClient()
+    const {
+      data: { user: authUser },
+    } = await supabase.auth.getUser()
+    if (!authUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    const roleRes = await supabase
+      .from('users')
+      .select('id, role, designation')
+      .eq('id', authUser.id)
+      .single()
+    const actorRole = resolveRole(roleRes.data)
+    if (!isFullAccessRole(actorRole) && !hasPermission(actorRole, 'ASSIGN_TASK')) {
+      return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    }
+
     const { searchParams } = new URL(request.url)
     const taskId = searchParams.get('taskId')
     const month = searchParams.get('month') || new Date().toISOString().slice(0, 7)

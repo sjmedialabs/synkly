@@ -11,7 +11,7 @@ import {
 } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useState, useEffect, Suspense } from 'react'
 import { AlertCircle, CheckCircle2, Lock } from 'lucide-react'
 
@@ -22,25 +22,73 @@ function SetPasswordForm() {
   const [success, setSuccess] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [isValidating, setIsValidating] = useState(true)
+  const [tokenUserId, setTokenUserId] = useState<string | null>(null)
   const router = useRouter()
+  const searchParams = useSearchParams()
 
   useEffect(() => {
-    // Check if user is authenticated and has a valid session
+    // IMPORTANT: onboarding must bind password update to the invite-token user only.
+    // Never rely on an already logged-in browser session.
     const checkSession = async () => {
       const supabase = createClient()
-      const { data: { session } } = await supabase.auth.getSession()
-      
-      if (!session) {
+      const isForceReset = searchParams.get('force_reset') === '1'
+      const hash = window.location.hash || ''
+      const hashParams = new URLSearchParams(hash.replace('#', ''))
+      const accessToken = hashParams.get('access_token')
+      const refreshToken = hashParams.get('refresh_token')
+      const flowType = hashParams.get('type')
+
+      // Force-reset path: authenticated user changing own password.
+      if (isForceReset) {
+        const { data: { session } } = await supabase.auth.getSession()
+        if (!session?.user) {
+          setError('You must be logged in to reset your password.')
+          setIsValidating(false)
+          return
+        }
+        setTokenUserId(session.user.id)
+        setIsValidating(false)
+        return
+      }
+
+      // Invite/recovery path: must have token in URL hash.
+      if (!accessToken || !refreshToken || !flowType) {
+        setError('Invalid invite link. Please use the latest link from your email.')
+        setIsValidating(false)
+        return
+      }
+      if (flowType !== 'invite' && flowType !== 'recovery') {
+        setError('Unsupported password setup link.')
+        setIsValidating(false)
+        return
+      }
+
+      // Clear existing browser session first to avoid accidental cross-account update.
+      await supabase.auth.signOut()
+
+      const { error: sessionError } = await supabase.auth.setSession({
+        access_token: accessToken,
+        refresh_token: refreshToken,
+      })
+      if (sessionError) {
         setError('Invalid or expired session. Please use the link from your invite email.')
         setIsValidating(false)
         return
       }
 
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user?.id) {
+        setError('Could not validate invited user. Please request a new invite.')
+        setIsValidating(false)
+        return
+      }
+
+      setTokenUserId(user.id)
       setIsValidating(false)
     }
 
     checkSession()
-  }, [])
+  }, [searchParams])
 
   const handleSetPassword = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -67,6 +115,10 @@ function SetPasswordForm() {
 
     try {
       const supabase = createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user?.id || !tokenUserId || user.id !== tokenUserId) {
+        throw new Error('Session mismatch. Please reopen your invite link and try again.')
+      }
 
       // Update user password
       const { error: updateError } = await supabase.auth.updateUser({
@@ -76,6 +128,9 @@ function SetPasswordForm() {
       if (updateError) {
         throw updateError
       }
+
+      // Best-effort status sync for app-level user table.
+      await fetch('/api/auth/onboarding-complete', { method: 'POST' })
 
       setSuccess(true)
       

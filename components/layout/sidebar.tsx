@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
+import { normalizeRole } from '@/lib/rbac'
 import {
   LayoutDashboard,
   FolderKanban,
@@ -28,25 +29,29 @@ interface UserWithRole {
   id: string
   email: string
   full_name: string | null
-  role: {
-    name: string
-  } | null
+  role: string | null
 }
 
 const roleLabels: Record<string, string> = {
+  master_admin: 'Master Admin',
   super_admin: 'Super Admin',
   project_manager: 'Project Manager',
   delivery_manager: 'Delivery Manager',
   team_lead: 'Team Lead',
-  employee: 'Developer',
+  senior: 'Senior',
+  junior: 'Junior',
+  trainee: 'Trainee',
 }
 
 const roleColors: Record<string, string> = {
+  master_admin: 'bg-rose-600',
   super_admin: 'bg-red-500',
   project_manager: 'bg-primary',
   delivery_manager: 'bg-cyan-500',
   team_lead: 'bg-green-500',
-  employee: 'bg-purple-500',
+  senior: 'bg-purple-500',
+  junior: 'bg-violet-500',
+  trainee: 'bg-amber-500',
 }
 
 type MenuItem = {
@@ -58,6 +63,24 @@ type MenuItem = {
 
 // Define menu items per role
 const menuConfig: Record<string, MenuItem[]> = {
+  master_admin: [
+    { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+    { label: 'Projects', href: '/projects', icon: FolderKanban },
+    { label: 'Tasks', href: '/tasks', icon: CheckSquare },
+    { label: 'Team', href: '/team', icon: Users },
+    { label: 'Capacity', href: '/capacity', icon: Clock },
+    { label: 'Utilization', href: '/utilization', icon: PieChart },
+    { label: 'Risks', href: '/risks', icon: ShieldAlert },
+    { label: 'Milestones', href: '/milestones', icon: Milestone },
+    { label: 'Sprints', href: '/sprints', icon: Target },
+    { label: 'Reports', href: '/reports', icon: BarChart3 },
+    {
+      label: 'Settings', href: '/settings', icon: Settings,
+      children: [
+        { label: 'Master Data', href: '/settings/master-data', icon: Database },
+      ]
+    },
+  ],
   super_admin: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { label: 'Projects', href: '/projects', icon: FolderKanban },
@@ -107,10 +130,17 @@ const menuConfig: Record<string, MenuItem[]> = {
     { label: 'Capacity', href: '/capacity', icon: Clock },
     { label: 'Sprints', href: '/sprints', icon: Target },
   ],
-  employee: [
+  senior: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { label: 'My Tasks', href: '/tasks', icon: CheckSquare },
-    { label: 'Projects', href: '/projects', icon: FolderKanban },
+  ],
+  junior: [
+    { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+    { label: 'My Tasks', href: '/tasks', icon: CheckSquare },
+  ],
+  trainee: [
+    { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+    { label: 'My Tasks', href: '/tasks', icon: CheckSquare },
   ],
 }
 
@@ -138,18 +168,32 @@ export function Sidebar() {
         return
       }
 
-      const { data: userData } = await supabase
+      const byIdRes = await supabase
         .from('users')
         .select(`
           id,
           email,
           full_name,
-          role:roles(name)
+          role
         `)
         .eq('id', authUser.id)
-        .single()
+        .maybeSingle()
+      let userData: UserWithRole | null = byIdRes.data as UserWithRole | null
+      if (!userData) {
+        const byEmailRes = await supabase
+          .from('users')
+          .select(`
+            id,
+            email,
+            full_name,
+            role
+          `)
+          .eq('email', (authUser.email || '').toLowerCase())
+          .maybeSingle()
+        userData = byEmailRes.data as UserWithRole | null
+      }
 
-      setUser(userData as UserWithRole)
+      setUser(userData)
       setLoading(false)
     }
 
@@ -176,8 +220,8 @@ export function Sidebar() {
     )
   }
 
-  const roleName = user?.role?.name || 'employee'
-  const menuItems = menuConfig[roleName] || menuConfig.employee
+  const roleName = normalizeRole(user?.role)
+  const menuItems = roleName ? (menuConfig[roleName] || []) : []
 
   const toggleExpanded = (href: string) => {
     setExpandedItems(prev =>
@@ -195,8 +239,8 @@ export function Sidebar() {
 
       {/* Role Badge */}
       <div className="mb-6">
-        <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium text-white ${roleColors[roleName]}`}>
-          {roleLabels[roleName] || roleName}
+        <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium text-white ${roleName ? roleColors[roleName] : 'bg-gray-500'}`}>
+          {roleName ? (roleLabels[roleName] || roleName) : 'No Role'}
         </span>
       </div>
 

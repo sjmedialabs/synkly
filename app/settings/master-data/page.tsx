@@ -9,13 +9,19 @@ import { Plus, Trash2 } from 'lucide-react'
 
 type MasterDataType = {
   id: string
-  name: string
+  name: string | null
 }
 
 type MasterDataValue = {
   id: string
-  name: string
+  name: string | null
   is_active: boolean
+}
+
+const formatTypeName = (name: string | null | undefined): string => {
+  if (!name) return 'Unknown'
+  const normalized = name.replace(/_/g, ' ')
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1)
 }
 
 export default function MasterDataPage() {
@@ -34,9 +40,12 @@ export default function MasterDataPage() {
         const response = await fetch('/api/master-data/types')
         if (!response.ok) throw new Error('Failed to load types')
         const data = await response.json()
-        setTypes(data.types || [])
-        if (data.types && data.types.length > 0) {
-          setSelectedType(data.types[0])
+        const safeTypes = (data.types || []).filter(
+          (type: MasterDataType | null) => type && typeof type.id === 'string' && type.id.length > 0,
+        ) as MasterDataType[]
+        setTypes(safeTypes)
+        if (safeTypes.length > 0) {
+          setSelectedType(safeTypes[0])
         }
       } catch (err) {
         console.error('[v0] Failed to load master data types:', err)
@@ -51,14 +60,17 @@ export default function MasterDataPage() {
 
   // Fetch values when selected type changes
   useEffect(() => {
-    if (!selectedType) return
+    if (!selectedType || !selectedType.name) return
 
     async function loadValues() {
       try {
         const response = await fetch(`/api/master-data/values?type=${selectedType.name}`)
         if (!response.ok) throw new Error('Failed to load values')
         const data = await response.json()
-        setValues(data.values || [])
+        const safeValues = (data.values || []).filter(
+          (value: MasterDataValue | null) => value && typeof value.id === 'string' && value.id.length > 0,
+        ) as MasterDataValue[]
+        setValues(safeValues)
         setError(null)
       } catch (err) {
         console.error('[v0] Failed to load values:', err)
@@ -71,7 +83,7 @@ export default function MasterDataPage() {
   }, [selectedType])
 
   const handleAddValue = async () => {
-    if (!newValue.trim() || !selectedType) {
+    if (!newValue.trim() || !selectedType || !selectedType.name) {
       setError('Please enter a value')
       return
     }
@@ -93,7 +105,9 @@ export default function MasterDataPage() {
       }
 
       const data = await response.json()
-      setValues([...values, data.value])
+      if (data?.value?.id) {
+        setValues([...values, data.value])
+      }
       setNewValue('')
       setError(null)
     } catch (err) {
@@ -139,7 +153,7 @@ export default function MasterDataPage() {
                           : 'bg-muted hover:bg-muted/80 text-foreground'
                       }`}
                     >
-                      {type.name.replace(/_/g, ' ').charAt(0).toUpperCase() + type.name.replace(/_/g, ' ').slice(1)}
+                      {formatTypeName(type.name)}
                     </button>
                   ))
                 )}
@@ -154,7 +168,7 @@ export default function MasterDataPage() {
             <CardHeader>
               <CardTitle className="text-lg">
                 {selectedType
-                  ? `${selectedType.name.replace(/_/g, ' ').charAt(0).toUpperCase() + selectedType.name.replace(/_/g, ' ').slice(1)} Values`
+                  ? `${formatTypeName(selectedType.name)} Values`
                   : 'Select a Type'}
               </CardTitle>
               <CardDescription>Add or manage values for the selected type</CardDescription>
@@ -204,7 +218,7 @@ export default function MasterDataPage() {
                         key={value.id}
                         className="flex items-center justify-between p-3 rounded-lg bg-muted/50 border border-border"
                       >
-                        <span className="text-sm font-medium text-foreground">{value.name}</span>
+                        <span className="text-sm font-medium text-foreground">{value.name || 'Unnamed'}</span>
                         <button
                           onClick={async () => {
                             try {

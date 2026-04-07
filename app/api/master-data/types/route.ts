@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
+import { canAccessAll, getAuthContext } from '@/lib/rbac-server'
 
 function getAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -11,11 +12,15 @@ function getAdminClient() {
 
 export async function GET() {
   try {
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
     const adminClient = getAdminClient()
     
     const { data, error } = await adminClient
       .from('master_data_types')
       .select('id, name')
+      .neq('name', 'role')
       .order('name')
     
     if (error) {
@@ -32,6 +37,10 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!canAccessAll(ctx.role)) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+
     const body = await request.json()
     const { name } = body
     

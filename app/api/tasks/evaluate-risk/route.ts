@@ -1,10 +1,15 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
+import { canAccessAll, getAuthContext } from '@/lib/rbac-server'
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient()
 
   try {
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!canAccessAll(ctx.role)) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+
     const body = await request.json()
     const { taskIds } = body
 
@@ -53,6 +58,10 @@ export async function GET() {
   const supabase = await createClient()
 
   try {
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!canAccessAll(ctx.role)) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+
     // Get tasks with risk data
     const { data: riskyTasks, error } = await supabase
       .from('tasks')

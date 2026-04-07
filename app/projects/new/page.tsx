@@ -36,7 +36,6 @@ export default function NewProjectPage() {
   const [currentStep, setCurrentStep] = useState(1)
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
 
   // Data
   const [departments, setDepartments] = useState<Department[]>([])
@@ -64,17 +63,32 @@ export default function NewProjectPage() {
           return
         }
 
-        setCurrentUserId(user.id)
+        // Preferred source: centralized master-data API
+        const departmentsRes = await fetch('/api/master-data/values?type=department')
+        if (departmentsRes.ok) {
+          const departmentsJson = await departmentsRes.json()
+          const departmentsData = departmentsJson.values || []
+          if (departmentsData.length > 0) {
+            setDepartments(
+              departmentsData.map((department: any) => ({
+                id: department.id,
+                name: department.name,
+                source: 'master_table' as const,
+              }))
+            )
+            return
+          }
+        }
 
-        // Preferred source: departments master table
-        const { data: departmentsData, error: departmentsError } = await supabase
+        // Secondary source: legacy departments table
+        const { data: legacyDepartmentsData, error: legacyDepartmentsError } = await supabase
           .from('departments')
           .select('id, name')
           .order('name')
 
-        if (!departmentsError && departmentsData && departmentsData.length > 0) {
+        if (!legacyDepartmentsError && legacyDepartmentsData && legacyDepartmentsData.length > 0) {
           setDepartments(
-            departmentsData.map((department) => ({
+            legacyDepartmentsData.map((department) => ({
               id: department.id,
               name: department.name,
               source: 'master_table' as const,
@@ -124,7 +138,7 @@ export default function NewProjectPage() {
       const { data, error } = await supabase
         .from('users')
         .select('id, full_name, email')
-        .eq('department_id', department.id)
+        .eq('department_id', department.id) // from master_data_values
         .eq('is_active', true)
         .order('full_name')
 
@@ -191,15 +205,11 @@ export default function NewProjectPage() {
 
     setCreating(true)
     try {
-      const basePayload: Record<string, unknown> = {
+      const projectPayload: Record<string, unknown> = {
         name: projectData.name.trim(),
         description: projectData.description.trim() || null,
         priority: projectData.priority,
         status: 'active',
-      }
-
-      const modernPayload: Record<string, unknown> = {
-        ...basePayload,
         team_lead_id: selectedTeamLead.id,
         onboarded_date: projectData.onboarded_date || null,
         assigned_date: projectData.assigned_date || null,
@@ -208,71 +218,20 @@ export default function NewProjectPage() {
       }
 
       if (selectedDepartment.source === 'master_table') {
-        modernPayload.department_id = selectedDepartment.id
+        projectPayload.department_id = selectedDepartment.id
       }
 
-      let { data, error } = await supabase
-        .from('projects')
-        .insert([modernPayload])
-        .select('id')
-        .single()
-
-      // Fallback for legacy schema
-      if (error || !data) {
-        console.warn('Modern project insert failed, trying legacy insert:', error?.message)
-        const legacyPayload: Record<string, unknown> = {
-          ...basePayload,
-          project_lead_id: selectedTeamLead.id,
-          start_date: projectData.assigned_date || projectData.onboarded_date || null,
-          end_date: projectData.projected_end_date || null,
-        }
-
-        if (currentUserId) {
-          legacyPayload.created_by = currentUserId
-        }
-
-        const legacyResult = await supabase
-          .from('projects')
-          .insert([legacyPayload])
-          .select('id')
-          .single()
-
-        data = legacyResult.data
-        error = legacyResult.error
+      const response = await fetch('/api/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(projectPayload),
+      })
+      const result = await response.json()
+      if (!response.ok || !result?.project?.id) {
+        throw new Error(result?.error || 'Failed to create project')
       }
 
-      // Last-resort fallback: minimal insert
-      if (error || !data) {
-        console.warn('Legacy project insert failed, trying minimal insert:', error?.message)
-        const minimalResult = await supabase
-          .from('projects')
-          .insert([basePayload])
-          .select('id')
-          .single()
-
-        data = minimalResult.data
-        error = minimalResult.error
-      }
-
-      if (error || !data) throw error || new Error('Failed to create project')
-
-      // Best-effort: attach selected lead to project members
-      const { error: projectUserError } = await supabase
-        .from('project_users')
-        .upsert(
-          {
-            project_id: data.id,
-            user_id: selectedTeamLead.id,
-            role: 'lead',
-          },
-          { onConflict: 'project_id,user_id' }
-        )
-
-      if (projectUserError) {
-        console.warn('Unable to link team lead in project_users:', projectUserError.message)
-      }
-
-      router.push(`/projects/${data.id}`)
+      router.push(`/projects/${result.project.id}`)
     } catch (error: any) {
       console.error('Error creating project:', error)
       alert('Error creating project: ' + error.message)

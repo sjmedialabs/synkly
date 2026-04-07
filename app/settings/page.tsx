@@ -24,11 +24,11 @@ export default function SettingsPage() {
 
       const { data: userData } = await supabase
         .from('users')
-        .select('role:roles(name)')
+        .select('role')
         .eq('id', user.id)
         .single()
 
-      if (userData?.role?.name !== 'super_admin') {
+      if (userData?.role !== 'super_admin' && userData?.role !== 'master_admin') {
         router.push('/dashboard')
         return
       }

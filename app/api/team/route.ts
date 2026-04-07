@@ -1,5 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
+import { resolveRole } from '@/lib/rbac'
+import { createClient as createServerClient } from '@/lib/supabase/server'
 
 // Create admin client with service role key for user management
 function getAdminClient() {
@@ -13,7 +15,22 @@ function getAdminClient() {
 // GET - Sync auth users to users table and return all team members
 export async function GET() {
   try {
+    const serverClient = await createServerClient()
+    const {
+      data: { user: sessionUser },
+    } = await serverClient.auth.getUser()
+    if (!sessionUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
     const adminClient = getAdminClient()
+    const actorRes = await adminClient
+      .from('users')
+      .select('id, role, tenant_id')
+      .eq('id', sessionUser.id)
+      .single()
+    const actorRole = resolveRole(actorRes.data)
+    const actorTenantId = (actorRes.data as any)?.tenant_id || null
+    const isPlatformMasterAdmin = actorRole === 'master_admin' && !actorTenantId
+    const isFullAccess = actorRole === 'super_admin' || actorRole === 'project_manager' || actorRole === 'delivery_manager'
     
     // Get all auth users
     const { data: authUsers, error: authError } = await adminClient.auth.admin.listUsers()
@@ -52,15 +69,22 @@ export async function GET() {
       }
     }
     
-    // Return all users
-    const { data: allUsers, error: fetchError } = await adminClient
+    // Return all users (backward compatible with old schema)
+    let allUsers: any[] | null = null
+    let fetchError: any = null
+    const modernQuery = await adminClient
       .from('users')
       .select(`
         id,
         email,
         full_name,
+        role,
+        department,
+        designation,
         department_id,
+        division_id,
         designation_id,
+        tenant_id,
         is_active,
         created_at,
         experience_years,
@@ -68,14 +92,54 @@ export async function GET() {
         reporting_manager_id
       `)
       .order('created_at', { ascending: false })
+    allUsers = modernQuery.data as any[] | null
+    fetchError = modernQuery.error
+
+    if (fetchError) {
+      const legacyQuery = await adminClient
+        .from('users')
+        .select(`
+          id,
+          email,
+          full_name,
+          department,
+          designation,
+          is_active,
+          created_at,
+          experience_years,
+          skillset,
+          reporting_manager_id
+        `)
+        .order('created_at', { ascending: false })
+      allUsers = legacyQuery.data as any[] | null
+      fetchError = legacyQuery.error
+    }
     
     if (fetchError) {
       console.error('[team API] Failed to fetch users:', fetchError)
       return NextResponse.json({ error: fetchError.message, code: fetchError.code }, { status: 500 })
     }
     
-    console.log('[team API] Successfully fetched users:', allUsers?.length || 0)
-    return NextResponse.json({ users: allUsers, synced: missingUsers.length })
+    let visibleUsers = allUsers || []
+    if (!isPlatformMasterAdmin) {
+      if (!actorTenantId) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+      visibleUsers = visibleUsers.filter((u: any) => u.tenant_id === actorTenantId)
+    }
+    if (!isPlatformMasterAdmin && !isFullAccess) {
+      if (actorRole === 'team_lead') {
+        visibleUsers = visibleUsers.filter((u: any) => u.reporting_manager_id === sessionUser.id || u.id === sessionUser.id)
+      } else {
+        visibleUsers = visibleUsers.filter((u: any) => u.id === sessionUser.id)
+      }
+    }
+
+    const adaptedUsers = visibleUsers.map((user) => ({
+      ...user,
+      role: resolveRole(user),
+      name: user.full_name || null,
+    }))
+    console.log('[team API] Successfully fetched users:', adaptedUsers.length || 0)
+    return NextResponse.json({ users: adaptedUsers, synced: missingUsers.length })
   } catch (err) {
     console.error('[team API] GET error:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
@@ -84,15 +148,26 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
+    const serverClient = await createServerClient()
+    const {
+      data: { user: sessionUser },
+    } = await serverClient.auth.getUser()
+    if (!sessionUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
     const body = await request.json()
     const {
       email,
       full_name,
       department,
+      department_id,
+      division_id,
       designation,
+      designation_id,
+      tenant_id,
       experience_years,
       skillset,
       reporting_manager_id,
+      role,
       is_active = true
     } = body
 
@@ -101,6 +176,22 @@ export async function POST(request: NextRequest) {
     }
 
     const adminClient = getAdminClient()
+    const actorRes = await adminClient
+      .from('users')
+      .select('id, role, tenant_id')
+      .eq('id', sessionUser.id)
+      .single()
+    const actorRole = resolveRole(actorRes.data)
+    const actorTenantId = (actorRes.data as any)?.tenant_id || null
+    const isPlatformMasterAdmin = actorRole === 'master_admin' && !actorTenantId
+    const isTenantSuperAdmin = actorRole === 'super_admin' && !!actorTenantId
+    if (!isPlatformMasterAdmin && !isTenantSuperAdmin) {
+      return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    }
+    const effectiveTenantId = isPlatformMasterAdmin ? (tenant_id || null) : actorTenantId
+    if (!effectiveTenantId) {
+      return NextResponse.json({ error: 'tenant_id is required' }, { status: 400 })
+    }
     const skillsetArr = skillset && Array.isArray(skillset) ? skillset : []
 
     // Check if user already exists in auth
@@ -150,22 +241,72 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Failed to create team member' }, { status: 500 })
     }
 
-    // Upsert into users table
-    const { data: userData, error: upsertError } = await adminClient
+    const modernPayload = {
+      id: userId,
+      email,
+      full_name,
+      department: department || null,
+      department_id: department_id || null,
+      division_id: division_id || null,
+      designation: designation || null,
+      designation_id: designation_id || null,
+      tenant_id: effectiveTenantId,
+      experience_years: experience_years || null,
+      skillset: skillsetArr,
+      reporting_manager_id: reporting_manager_id || null,
+      role: role || null,
+      is_active,
+    }
+
+    // Legacy-safe payload for schemas without *_id columns.
+    const legacyPayload = {
+      id: userId,
+      email,
+      full_name,
+      department: department || null,
+      designation: designation || null,
+      experience_years: experience_years || null,
+      skillset: skillsetArr,
+      reporting_manager_id: reporting_manager_id || null,
+      role: role || null,
+      is_active,
+    }
+    const legacyNoRolePayload = {
+      id: userId,
+      email,
+      full_name,
+      department: department || null,
+      designation: designation || null,
+      experience_years: experience_years || null,
+      skillset: skillsetArr,
+      reporting_manager_id: reporting_manager_id || null,
+      is_active,
+    }
+
+    // Upsert into users table (modern first, fallback for older schema)
+    let upsertRes = await adminClient
       .from('users')
-      .upsert({
-        id: userId,
-        email,
-        full_name,
-        department: department || null,
-        designation: designation || null,
-        experience_years: experience_years || null,
-        skillset: skillsetArr,
-        reporting_manager_id: reporting_manager_id || null,
-        is_active,
-      }, { onConflict: 'id' })
+      .upsert(modernPayload as any, { onConflict: 'id' })
       .select('*')
       .single()
+
+    if (upsertRes.error?.code === '42703' || upsertRes.error?.code === 'PGRST204') {
+      upsertRes = await adminClient
+        .from('users')
+        .upsert(legacyPayload as any, { onConflict: 'id' })
+        .select('*')
+        .single()
+    }
+    if (upsertRes.error?.code === '42703' || upsertRes.error?.code === 'PGRST204') {
+      upsertRes = await adminClient
+        .from('users')
+        .upsert(legacyNoRolePayload as any, { onConflict: 'id' })
+        .select('*')
+        .single()
+    }
+
+    const userData = upsertRes.data
+    const upsertError = upsertRes.error
 
     if (upsertError) {
       console.error('[team API] Users upsert error:', upsertError)
@@ -184,15 +325,26 @@ export async function POST(request: NextRequest) {
 
 export async function PUT(request: NextRequest) {
   try {
+    const serverClient = await createServerClient()
+    const {
+      data: { user: sessionUser },
+    } = await serverClient.auth.getUser()
+    if (!sessionUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
     const body = await request.json()
     const {
       id,
       full_name,
       department,
+      department_id,
+      division_id,
       designation,
+      designation_id,
+      tenant_id,
       experience_years,
       skillset,
       reporting_manager_id,
+      role,
       is_active
     } = body
 
@@ -201,26 +353,102 @@ export async function PUT(request: NextRequest) {
     }
 
     const adminClient = getAdminClient()
+    const actorRes = await adminClient
+      .from('users')
+      .select('id, role, tenant_id')
+      .eq('id', sessionUser.id)
+      .single()
+    const actorRole = resolveRole(actorRes.data)
+    const actorTenantId = (actorRes.data as any)?.tenant_id || null
+    const isPlatformMasterAdmin = actorRole === 'master_admin' && !actorTenantId
+    const isTenantSuperAdmin = actorRole === 'super_admin' && !!actorTenantId
+    const isFullAccess = isTenantSuperAdmin || actorRole === 'project_manager' || actorRole === 'delivery_manager'
+    const isTeamLead = actorRole === 'team_lead'
+    if (!isPlatformMasterAdmin && !actorTenantId) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    if (!isPlatformMasterAdmin && !isFullAccess && !isTeamLead) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    const targetRes = await adminClient
+      .from('users')
+      .select('id, tenant_id, reporting_manager_id')
+      .eq('id', id)
+      .single()
+    if (targetRes.error) return NextResponse.json({ error: 'User not found' }, { status: 404 })
+    if (!isPlatformMasterAdmin && targetRes.data?.tenant_id !== actorTenantId) {
+      return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    }
+    if (isTeamLead) {
+      if (targetRes.data?.reporting_manager_id !== sessionUser.id && targetRes.data?.id !== sessionUser.id) {
+        return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+      }
+    }
 
     const skillsetArr = skillset
       ? (Array.isArray(skillset) ? skillset : skillset.split(',').map((s: string) => s.trim()).filter(Boolean))
       : null
 
-    const { data: updatedUser, error } = await adminClient
+    const modernUpdate = {
+      full_name,
+      department: department || null,
+      department_id: department_id || null,
+      division_id: division_id || null,
+      designation: designation || null,
+      designation_id: designation_id || null,
+      tenant_id: isPlatformMasterAdmin ? (tenant_id || targetRes.data?.tenant_id || null) : actorTenantId,
+      experience_years: experience_years || null,
+      skillset: skillsetArr,
+      reporting_manager_id: reporting_manager_id || null,
+      role: role || null,
+      is_active,
+      updated_at: new Date().toISOString(),
+    }
+
+    const legacyUpdate = {
+      full_name,
+      department: department || null,
+      designation: designation || null,
+      experience_years: experience_years || null,
+      skillset: skillsetArr,
+      reporting_manager_id: reporting_manager_id || null,
+      role: role || null,
+      is_active,
+      updated_at: new Date().toISOString(),
+    }
+    const legacyNoRoleUpdate = {
+      full_name,
+      department: department || null,
+      designation: designation || null,
+      experience_years: experience_years || null,
+      skillset: skillsetArr,
+      reporting_manager_id: reporting_manager_id || null,
+      is_active,
+      updated_at: new Date().toISOString(),
+    }
+
+    let updateRes = await adminClient
       .from('users')
-      .update({
-        full_name,
-        department: department || null,
-        designation: designation || null,
-        experience_years: experience_years || null,
-        skillset: skillsetArr,
-        reporting_manager_id: reporting_manager_id || null,
-        is_active,
-        updated_at: new Date().toISOString(),
-      })
+      .update(modernUpdate as any)
       .eq('id', id)
       .select('*')
       .single()
+
+    if (updateRes.error?.code === '42703' || updateRes.error?.code === 'PGRST204') {
+      updateRes = await adminClient
+        .from('users')
+        .update(legacyUpdate as any)
+        .eq('id', id)
+        .select('*')
+        .single()
+    }
+    if (updateRes.error?.code === '42703' || updateRes.error?.code === 'PGRST204') {
+      updateRes = await adminClient
+        .from('users')
+        .update(legacyNoRoleUpdate as any)
+        .eq('id', id)
+        .select('*')
+        .single()
+    }
+
+    const updatedUser = updateRes.data
+    const error = updateRes.error
 
     if (error) {
       console.error('[team API] PUT error:', error)
@@ -236,6 +464,12 @@ export async function PUT(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
+    const serverClient = await createServerClient()
+    const {
+      data: { user: sessionUser },
+    } = await serverClient.auth.getUser()
+    if (!sessionUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
     const { searchParams } = new URL(request.url)
     const id = searchParams.get('id')
 
@@ -244,6 +478,21 @@ export async function DELETE(request: NextRequest) {
     }
 
     const adminClient = getAdminClient()
+    const actorRes = await adminClient
+      .from('users')
+      .select('id, role, tenant_id')
+      .eq('id', sessionUser.id)
+      .single()
+    const actorRole = resolveRole(actorRes.data)
+    const actorTenantId = (actorRes.data as any)?.tenant_id || null
+    const isPlatformMasterAdmin = actorRole === 'master_admin' && !actorTenantId
+    const isTenantSuperAdmin = actorRole === 'super_admin' && !!actorTenantId
+    if (!isPlatformMasterAdmin && !isTenantSuperAdmin) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    const targetRes = await adminClient.from('users').select('id, tenant_id').eq('id', id).single()
+    if (targetRes.error) return NextResponse.json({ error: 'User not found' }, { status: 404 })
+    if (!isPlatformMasterAdmin && targetRes.data?.tenant_id !== actorTenantId) {
+      return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    }
 
     // Delete from auth.users first (will cascade to users table if FK set up)
     const { error: authDeleteError } = await adminClient.auth.admin.deleteUser(id)

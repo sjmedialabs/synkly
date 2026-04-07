@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
+import { can, canAccessAll, getAuthContext } from '@/lib/rbac-server'
 
 // Restricted designation names
 const RESTRICTED_DESIGNATIONS = ['Super Admin', 'Delivery Manager']
@@ -8,6 +9,12 @@ export async function GET(request: NextRequest) {
   const supabase = await createClient()
 
   try {
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!canAccessAll(ctx.role) && !can(ctx.role, 'ASSIGN_TASK')) {
+      return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    }
+
     const searchParams = request.nextUrl.searchParams
     const projectId = searchParams.get('project_id')
 
@@ -16,7 +23,7 @@ export async function GET(request: NextRequest) {
     // Fetch all active users from users table with TEXT designation
     const { data: allUsers, error: usersError } = await supabase
       .from('users')
-      .select('id, email, full_name, designation, department, is_active')
+      .select('id, email, full_name, designation, department, reporting_manager_id, is_active')
       .eq('is_active', true)
       .order('full_name', { ascending: true })
 
@@ -37,6 +44,9 @@ export async function GET(request: NextRequest) {
 
     // If project_id provided, filter to only users on that project
     let finalUsers = assignableUsers
+    if (!canAccessAll(ctx.role)) {
+      finalUsers = finalUsers.filter((u) => u.reporting_manager_id === ctx.userId)
+    }
     if (projectId) {
       const { data: projectUsers, error: projectError } = await supabase
         .from('project_users')

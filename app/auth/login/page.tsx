@@ -14,13 +14,19 @@ import { Label } from '@/components/ui/label'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useState } from 'react'
-import { Shield, Briefcase, Users, Code, Building2, LogIn } from 'lucide-react'
+import { Shield, Briefcase, Users, User, LogIn } from 'lucide-react'
+import { ROLE_LABELS, resolveRole } from '@/lib/rbac'
 
 const roleConfig: Record<string, {
   name: string
   icon: React.ElementType
   bgColor: string
 }> = {
+  'master_admin': {
+    name: 'Master Admin',
+    icon: Shield,
+    bgColor: 'bg-rose-600',
+  },
   'super_admin': {
     name: 'Super Admin',
     icon: Shield,
@@ -41,16 +47,9 @@ const roleConfig: Record<string, {
     icon: Users,
     bgColor: 'bg-green-500',
   },
-  'employee': {
-    name: 'Developer',
-    icon: Code,
-    bgColor: 'bg-purple-500',
-  },
-  'client': {
-    name: 'Client',
-    icon: Building2,
-    bgColor: 'bg-accent',
-  },
+  'senior': { name: 'Senior', icon: User, bgColor: 'bg-purple-500' },
+  'junior': { name: 'Junior', icon: User, bgColor: 'bg-violet-500' },
+  'trainee': { name: 'Trainee', icon: User, bgColor: 'bg-accent' },
 }
 
 export default function LoginPage() {
@@ -64,13 +63,14 @@ export default function LoginPage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     const supabase = createClient()
+    const emailNormalized = email.trim().toLowerCase()
     setIsLoading(true)
     setError(null)
     setUserRole(null)
 
     try {
       const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-        email,
+        email: emailNormalized,
         password,
       })
 
@@ -78,20 +78,35 @@ export default function LoginPage() {
 
       // Fetch user's role and determine redirect
       if (authData.user) {
-        const { data: userData } = await supabase
+        const byIdRes = await supabase
           .from('users')
-          .select(`
-            *,
-            roles (name)
-          `)
+          .select('*')
           .eq('id', authData.user.id)
-          .single()
+          .maybeSingle()
+        let userData: any = byIdRes.data
+        if (!userData) {
+          const byEmailRes = await supabase
+            .from('users')
+            .select('*')
+            .eq('email', emailNormalized)
+            .maybeSingle()
+          userData = byEmailRes.data
+        }
 
-        if (userData?.roles?.name) {
-          setUserRole(userData.roles.name)
+        if (userData?.password_reset_required) {
+          router.push('/set-password?force_reset=1')
+          return
+        }
+
+        const resolvedRole = resolveRole(userData)
+        if (resolvedRole) {
+          setUserRole(resolvedRole)
           
           // Role-based redirects
-          switch (userData.roles.name) {
+          switch (resolvedRole) {
+            case 'master_admin':
+              router.push('/dashboard')
+              break
             case 'super_admin':
               router.push('/dashboard')
               break
@@ -119,7 +134,7 @@ export default function LoginPage() {
     }
   }
 
-  const config = userRole ? roleConfig[userRole] : null
+  const config = userRole ? (roleConfig[userRole] || null) : null
   const Icon = config?.icon
 
   return (
@@ -174,7 +189,7 @@ export default function LoginPage() {
                         {Icon && <Icon className="w-4 h-4" />}
                       </div>
                       <span className="text-sm text-green-700">
-                        Logging in as <strong>{config.name}</strong>
+                        Logging in as <strong>{ROLE_LABELS[userRole as keyof typeof ROLE_LABELS] || config.name}</strong>
                       </span>
                     </div>
                   )}

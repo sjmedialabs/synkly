@@ -1,9 +1,13 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
+import { canAccessAll, getAuthContext } from '@/lib/rbac-server'
 
 export async function POST(request: NextRequest) {
   try {
     const supabase = await createClient()
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!canAccessAll(ctx.role)) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
 
     // Check if sprints already exist for the project
     const { data: existingSprints } = await supabase

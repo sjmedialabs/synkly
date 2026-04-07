@@ -10,12 +10,13 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { 
   ArrowLeft, 
   Calendar, 
-  Users, 
+  Users,
   CheckSquare, 
   Target,
   Plus,
   X,
-  MoreVertical
+  MoreVertical,
+  Eye,
 } from 'lucide-react'
 
 interface Project {
@@ -37,26 +38,15 @@ interface Module {
   description: string | null
   estimated_hours: number
   status: string
+  is_active?: boolean
 }
 
 interface Task {
   id: string
-  title: string
   status: string
-  priority: string
-  assignee: { full_name: string; email: string } | null
-}
-
-interface Milestone {
-  id: string
-  name: string
-  status: string
-  end_date: string | null
-}
-
-interface TeamMember {
-  id: string
-  user: { id: string; full_name: string; email: string; role: { name: string } | null } | null
+  module_id: string | null
+  estimation?: number | null
+  estimated_hours?: number | null
 }
 
 const statusColors: Record<string, string> = {
@@ -67,13 +57,6 @@ const statusColors: Record<string, string> = {
   cancelled: 'bg-destructive/10 text-destructive',
 }
 
-const taskStatusColors: Record<string, string> = {
-  todo: 'bg-muted',
-  in_progress: 'bg-primary',
-  review: 'bg-accent',
-  done: 'bg-green-500',
-}
-
 export default function ProjectDetailPage() {
   const params = useParams()
   const projectId = params.id as string
@@ -81,8 +64,6 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<Project | null>(null)
   const [modules, setModules] = useState<Module[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
-  const [milestones, setMilestones] = useState<Milestone[]>([])
-  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddModuleModal, setShowAddModuleModal] = useState(false)
   const [newModuleName, setNewModuleName] = useState('')
@@ -114,43 +95,40 @@ export default function ProjectDetailPage() {
 
       setProject(projectData)
 
-      // Fetch related data
-      const [modulesRes, tasksRes, milestonesRes, teamRes] = await Promise.all([
+      // Fetch related data (single tasks fetch used for module aggregation)
+      const [modulesResModern, tasksRes] = await Promise.all([
         supabase
           .from('modules')
-          .select('id, name, description, estimated_hours, status')
+          .select('id, name, description, estimated_hours, status, is_active')
           .eq('project_id', projectId)
           .order('created_at', { ascending: false }),
         supabase
           .from('tasks')
           .select(`
             id,
-            title,
             status,
-            priority,
-            assignee:users!tasks_assignee_id_fkey(full_name, email)
+            module_id,
+            estimation,
+            estimated_hours
           `)
           .eq('project_id', projectId)
-          .order('created_at', { ascending: false })
-          .limit(10),
-        supabase
-          .from('milestones')
-          .select('id, name, status, end_date')
-          .eq('project_id', projectId)
-          .order('end_date'),
-        supabase
-          .from('project_users')
-          .select(`
-            id,
-            user:users(id, full_name, email, role:roles(name))
-          `)
-          .eq('project_id', projectId),
+          .order('created_at', { ascending: false }),
       ])
 
-      setModules(modulesRes.data || [])
-      setTasks(tasksRes.data || [])
-      setMilestones(milestonesRes.data || [])
-      setTeamMembers(teamRes.data || [])
+      // Backward compatibility for environments without modules.is_active yet
+      let finalModules = modulesResModern.data as Module[] | null
+      if (modulesResModern.error) {
+        const modulesResLegacy = await supabase
+          .from('modules')
+          .select('id, name, description, estimated_hours, status')
+          .eq('project_id', projectId)
+          .order('created_at', { ascending: false })
+
+        finalModules = (modulesResLegacy.data || []).map((m: any) => ({ ...m, is_active: true }))
+      }
+
+      setModules(finalModules || [])
+      setTasks((tasksRes.data as Task[]) || [])
       setLoading(false)
     }
 
@@ -186,6 +164,20 @@ export default function ProjectDetailPage() {
 
   const totalEstimation = modules.reduce((sum, mod) => sum + (mod.estimated_hours || 0), 0)
 
+  const moduleAggregates = modules.map((module) => {
+    const moduleTasks = tasks.filter((task) => task.module_id === module.id)
+    const taskCount = moduleTasks.length
+    const estimatedTime = moduleTasks.reduce((sum, task) => {
+      const estimation = Number(task.estimation ?? task.estimated_hours ?? 0)
+      return sum + (Number.isFinite(estimation) ? estimation : 0)
+    }, 0)
+    return {
+      module,
+      taskCount,
+      estimatedTime,
+    }
+  })
+
   const handleAddModule = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!newModuleName.trim() || !projectId) return
@@ -204,7 +196,13 @@ export default function ProjectDetailPage() {
       if (error) throw error
 
       if (data) {
-        setModules([...modules, data[0] as Module])
+        setModules([
+          ...modules,
+          {
+            ...(data[0] as Module),
+            is_active: (data[0] as any).is_active ?? true,
+          },
+        ])
         setNewModuleName('')
         setShowAddModuleModal(false)
       }
@@ -213,6 +211,31 @@ export default function ProjectDetailPage() {
       alert('Error creating module: ' + error.message)
     } finally {
       setCreatingModule(false)
+    }
+  }
+
+  const handleToggleModuleActive = async (moduleId: string, currentValue: boolean) => {
+    try {
+      const response = await fetch('/api/modules/update-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          module_id: moduleId,
+          is_active: !currentValue,
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to update module status')
+      }
+
+      setModules((prev) =>
+        prev.map((module) =>
+          module.id === moduleId ? { ...module, is_active: !currentValue } : module,
+        ),
+      )
+    } catch (error: any) {
+      alert('Failed to update module status')
     }
   }
 
@@ -307,9 +330,9 @@ export default function ProjectDetailPage() {
         </Card>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
+      <div className="grid gap-6 grid-cols-1">
         {/* Modules */}
-        <Card className="lg:col-span-2">
+        <Card className="col-span-full">
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>Modules</CardTitle>
             <div className="flex gap-2">
@@ -329,108 +352,68 @@ export default function ProjectDetailPage() {
           <CardContent>
             {modules.length === 0 ? (
               <p className="text-center text-muted-foreground py-8">
-                No modules yet. Create one to organize your project.
+                No modules found. Add a module to get started.
               </p>
             ) : (
-              <div className="space-y-3">
-                {modules.map((module) => (
-                  <Link key={module.id} href={`/modules/${module.id}`}>
-                    <div className="flex items-center justify-between p-3 bg-muted/50 rounded-lg hover:bg-muted transition">
-                      <div className="flex items-center gap-3">
-                        <div className={`w-2 h-2 rounded-full ${
-                          module.status === 'completed' ? 'bg-green-500' :
-                          module.status === 'in_progress' ? 'bg-primary' :
-                          'bg-muted-foreground'
-                        }`} />
-                        <div>
-                          <p className="font-medium text-foreground">{module.name}</p>
-                          {module.description && (
-                            <p className="text-xs text-muted-foreground line-clamp-1">{module.description}</p>
-                          )}
-                        </div>
-                      </div>
-                      <span className="text-xs bg-primary/10 text-primary px-2 py-1 rounded">
-                        {module.estimated_hours}h
-                      </span>
-                    </div>
-                  </Link>
-                ))}
+              <div className="overflow-x-auto rounded-lg border border-border">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-secondary z-10">
+                    <tr>
+                      <th className="text-left px-3 py-2 font-semibold">Module Name</th>
+                      <th className="text-left px-3 py-2 font-semibold">Status</th>
+                      <th className="text-left px-3 py-2 font-semibold">Number of Tasks</th>
+                      <th className="text-left px-3 py-2 font-semibold">Estimated Time</th>
+                      <th className="text-right px-3 py-2 font-semibold">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {moduleAggregates.map(({ module, taskCount, estimatedTime }) => {
+                      const enabled = module.is_active ?? true
+                      return (
+                        <tr key={module.id} className="border-t border-border hover:bg-secondary/40 transition">
+                          <td className="px-3 py-2">
+                            <div>
+                              <p className="font-medium text-foreground">{module.name}</p>
+                              {module.description && (
+                                <p className="text-xs text-muted-foreground line-clamp-1">{module.description}</p>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                              enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
+                            }`}>
+                              {enabled ? 'Enabled' : 'Disabled'}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2">{taskCount || 0}</td>
+                          <td className="px-3 py-2">{estimatedTime || 0}h</td>
+                          <td className="px-3 py-2">
+                            <div className="flex items-center justify-end gap-2">
+                              <Link href={`/projects/${projectId}/modules/${module.id}`}>
+                                <Button size="sm" variant="outline">
+                                  <Eye className="w-4 h-4 mr-1" />
+                                  View
+                                </Button>
+                              </Link>
+                              <Button
+                                size="sm"
+                                variant={enabled ? 'secondary' : 'default'}
+                                onClick={() => handleToggleModuleActive(module.id, enabled)}
+                              >
+                                Toggle
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
               </div>
             )}
           </CardContent>
         </Card>
-
-        {/* Team & Milestones */}
-        <div className="space-y-6">
-          {/* Team */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Team</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {teamMembers.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No team members assigned.</p>
-              ) : (
-                <div className="space-y-3">
-                  {teamMembers.map((member) => (
-                    <div key={member.id} className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-                        <span className="text-sm font-medium text-primary">
-                          {(member.user?.full_name || member.user?.email || 'U')[0].toUpperCase()}
-                        </span>
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-foreground">
-                          {member.user?.full_name || member.user?.email?.split('@')[0]}
-                        </p>
-                        <p className="text-xs text-muted-foreground capitalize">
-                          {member.user?.role?.name?.replace('_', ' ') || 'Member'}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Milestones */}
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
-              <CardTitle>Milestones</CardTitle>
-              <Link href="/milestones">
-                <Button size="sm" variant="ghost">
-                  <Plus className="w-4 h-4" />
-                </Button>
-              </Link>
-            </CardHeader>
-            <CardContent>
-              {milestones.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No milestones yet.</p>
-              ) : (
-                <div className="space-y-3">
-                  {milestones.map((milestone) => (
-                    <div key={milestone.id} className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className={`w-2 h-2 rounded-full ${
-                          milestone.status === 'completed' ? 'bg-green-500' :
-                          milestone.status === 'in_progress' ? 'bg-primary' :
-                          'bg-muted-foreground'
-                        }`} />
-                        <span className="text-sm text-foreground">{milestone.name}</span>
-                      </div>
-                      {milestone.end_date && (
-                        <span className="text-xs text-muted-foreground">
-                          {new Date(milestone.end_date).toLocaleDateString()}
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
       </div>
 
       {/* Add Module Modal */}

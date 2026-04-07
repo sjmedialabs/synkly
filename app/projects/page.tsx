@@ -6,14 +6,13 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
-import { Plus, Grid3X3, List, FolderKanban } from 'lucide-react'
+import { Plus, FolderKanban, Pencil } from 'lucide-react'
 
 export default function ProjectsPage() {
   const supabase = createClient()
   const router = useRouter()
   const [projects, setProjects] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
   const [userRole, setUserRole] = useState<string | null>(null)
 
   // Only Super Admin, Project Manager, and Delivery Manager can create projects
@@ -30,35 +29,31 @@ export default function ProjectsPage() {
       // Fetch user's role
       const { data: userData } = await supabase
         .from('users')
-        .select('role:roles(name)')
+        .select('role')
         .eq('id', user.id)
         .single()
 
-      if (userData?.role?.name) {
-        setUserRole(userData.role.name)
+      if (userData?.role) {
+        setUserRole(userData.role)
       }
 
-      // Fetch all projects with estimations
-      const { data: projectsData } = await supabase
-        .from('projects')
-        .select(`
-          id,
-          name,
-          description,
-          status,
-          priority,
-          created_at,
-          modules(estimated_hours)
-        `)
-        .order('created_at', { ascending: false })
-
-      // Calculate total estimations for each project
-      const projectsWithEstimations = (projectsData || []).map(project => ({
-        ...project,
-        totalEstimation: (project.modules || []).reduce((sum: number, mod: any) => sum + (mod.estimated_hours || 0), 0)
-      }))
-
-      setProjects(projectsWithEstimations)
+      // RBAC-enforced project list from backend API
+      const projectsRes = await fetch('/api/projects')
+      const projectsJson = await projectsRes.json()
+      if (!projectsRes.ok) {
+        if (projectsRes.status === 403) {
+          router.push('/dashboard')
+          return
+        }
+        console.error('Failed to fetch projects:', projectsJson?.error)
+        setProjects([])
+        setLoading(false)
+        return
+      }
+      if (projectsJson?.role) {
+        setUserRole(projectsJson.role)
+      }
+      setProjects((projectsJson.projects || []) as any[])
       setLoading(false)
     }
 
@@ -85,20 +80,6 @@ export default function ProjectsPage() {
       title="Projects"
       actions={
         <div className="flex items-center gap-4">
-          <div className="flex gap-1 bg-muted rounded-lg p-1">
-            <button
-              onClick={() => setViewMode('grid')}
-              className={`p-2 rounded ${viewMode === 'grid' ? 'bg-background shadow-sm' : 'text-muted-foreground'}`}
-            >
-              <Grid3X3 className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => setViewMode('list')}
-              className={`p-2 rounded ${viewMode === 'list' ? 'bg-background shadow-sm' : 'text-muted-foreground'}`}
-            >
-              <List className="w-4 h-4" />
-            </button>
-          </div>
           {canCreateProject && (
             <Link href="/projects/new">
               <Button className="bg-accent hover:bg-accent/90 text-accent-foreground">
@@ -126,82 +107,57 @@ export default function ProjectsPage() {
             </Link>
           )}
         </div>
-      ) : viewMode === 'grid' ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {projects.map((project: any) => (
-            <Link key={project.id} href={`/projects/${project.id}`}>
-              <div className="bg-card border border-border rounded-lg p-6 hover:shadow-lg transition cursor-pointer h-full flex flex-col">
-                <h3 className="font-semibold text-lg text-foreground mb-2">{project.name}</h3>
-                <p className="text-sm text-muted-foreground mb-4 line-clamp-2 flex-1">{project.description || 'No description'}</p>
-                <div className="space-y-3">
-                  <div className="bg-primary/10 rounded p-2">
-                    <p className="text-xs text-muted-foreground">Total Estimation</p>
-                    <p className="text-lg font-bold text-primary">{project.totalEstimation}h</p>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium capitalize ${
-                      project.status === 'active' ? 'bg-primary/10 text-primary' :
-                      project.status === 'completed' ? 'bg-green-500/10 text-green-600' :
-                      project.status === 'on_hold' ? 'bg-accent/10 text-accent' :
-                      'bg-muted text-muted-foreground'
-                    }`}>
-                      {project.status?.replace('_', ' ')}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {new Date(project.created_at).toLocaleDateString()}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </Link>
-          ))}
-        </div>
       ) : (
         <div className="bg-card border border-border rounded-lg overflow-hidden">
           <table className="w-full">
             <thead className="bg-muted border-b border-border">
               <tr>
-                <th className="px-6 py-3 text-left text-sm font-semibold text-foreground">Project Name</th>
-                <th className="px-6 py-3 text-left text-sm font-semibold text-foreground">Estimation</th>
-                <th className="px-6 py-3 text-left text-sm font-semibold text-foreground">Status</th>
-                <th className="px-6 py-3 text-left text-sm font-semibold text-foreground">Priority</th>
-                <th className="px-6 py-3 text-left text-sm font-semibold text-foreground">Created</th>
+                <th className="px-4 py-2 text-left text-sm font-semibold text-foreground">Project Name</th>
+                <th className="px-4 py-2 text-left text-sm font-semibold text-foreground">Total Estimation</th>
+                <th className="px-4 py-2 text-left text-sm font-semibold text-foreground">Estimated Date of Delivery</th>
+                <th className="px-4 py-2 text-right text-sm font-semibold text-foreground">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
               {projects.map((project: any) => (
-                <tr key={project.id} className="hover:bg-muted/50 transition">
-                  <td className="px-6 py-4">
+                <tr key={project.id} className="hover:bg-muted/40 transition">
+                  <td className="px-4 py-2">
                     <Link href={`/projects/${project.id}`} className="text-primary hover:underline font-medium">
                       {project.name}
                     </Link>
                   </td>
-                  <td className="px-6 py-4">
-                    <span className="text-sm font-semibold text-primary bg-primary/10 px-3 py-1 rounded">
-                      {project.totalEstimation}h
-                    </span>
+                  <td className="px-4 py-2">{project.totalEstimation}h</td>
+                  <td className="px-4 py-2 text-sm text-muted-foreground">
+                    {project.projected_end_date
+                      ? new Date(project.projected_end_date).toLocaleDateString()
+                      : '—'}
                   </td>
-                  <td className="px-6 py-4">
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium capitalize ${
-                      project.status === 'active' ? 'bg-primary/10 text-primary' :
-                      project.status === 'completed' ? 'bg-green-500/10 text-green-600' :
-                      project.status === 'on_hold' ? 'bg-accent/10 text-accent' :
-                      'bg-muted text-muted-foreground'
-                    }`}>
-                      {project.status?.replace('_', ' ')}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium capitalize ${
-                      project.priority === 'high' ? 'bg-destructive/10 text-destructive' :
-                      project.priority === 'medium' ? 'bg-accent/10 text-accent' :
-                      'bg-muted text-muted-foreground'
-                    }`}>
-                      {project.priority || 'medium'}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-sm text-muted-foreground">
-                    {new Date(project.created_at).toLocaleDateString()}
+                  <td className="px-4 py-2">
+                    <div className="flex justify-end gap-2">
+                      <Link href={`/projects/${project.id}`}>
+                        <Button size="sm" variant="outline">View</Button>
+                      </Link>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={async () => {
+                          const newName = prompt('Rename project', project.name)
+                          if (!newName || !newName.trim() || newName.trim() === project.name) return
+                          const { error } = await supabase
+                            .from('projects')
+                            .update({ name: newName.trim(), updated_at: new Date().toISOString() })
+                            .eq('id', project.id)
+                          if (!error) {
+                            setProjects((prev) =>
+                              prev.map((p) => (p.id === project.id ? { ...p, name: newName.trim() } : p)),
+                            )
+                          }
+                        }}
+                      >
+                        <Pencil className="w-4 h-4 mr-1" />
+                        Rename
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))}

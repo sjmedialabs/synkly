@@ -1,9 +1,15 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
+import { can, canAccessAll, getAuthContext } from '@/lib/rbac-server'
 
 export async function GET(request: NextRequest) {
   try {
     const supabase = await createClient()
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!canAccessAll(ctx.role) && !can(ctx.role, 'ASSIGN_TASK')) {
+      return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    }
     const { searchParams } = new URL(request.url)
     const taskId = searchParams.get('taskId')
     const month = searchParams.get('month') || new Date().toISOString().slice(0, 7)
@@ -24,11 +30,14 @@ export async function GET(request: NextRequest) {
 
     const { data: users } = await supabase
       .from('users')
-      .select('id, email, full_name, designation, department')
+      .select('id, email, full_name, designation, department, reporting_manager_id')
       .eq('is_active', true)
 
     const restricted = ['Super Admin', 'Delivery Manager']
-    const eligible = (users || []).filter(u => !u.designation || !restricted.includes(u.designation))
+    let eligible = (users || []).filter(u => !u.designation || !restricted.includes(u.designation))
+    if (!canAccessAll(ctx.role)) {
+      eligible = eligible.filter((u: any) => u.reporting_manager_id === ctx.userId)
+    }
 
     const { data: capacity } = await supabase
       .from('employee_capacity')

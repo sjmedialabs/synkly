@@ -17,6 +17,7 @@ import {
   Clock,
   AlertCircle
 } from 'lucide-react'
+import { ROLE_LABELS, resolveRole, type RoleKey } from '@/lib/rbac'
 
 interface Stats {
   projects: number
@@ -43,23 +44,11 @@ interface Task {
   due_date: string | null
 }
 
-interface UserRole {
-  name: string
-}
-
-const roleLabels: Record<string, string> = {
-  super_admin: 'Super Admin',
-  project_manager: 'Project Manager',
-  delivery_manager: 'Delivery Manager',
-  team_lead: 'Team Lead',
-  employee: 'Developer',
-}
-
 export default function DashboardPage() {
   const supabase = createClient()
   const router = useRouter()
   const [userName, setUserName] = useState('')
-  const [userRole, setUserRole] = useState<string>('employee')
+  const [userRole, setUserRole] = useState<RoleKey | null>(null)
   const [stats, setStats] = useState<Stats>({
     projects: 0,
     activeProjects: 0,
@@ -81,14 +70,23 @@ export default function DashboardPage() {
       }
 
       // Fetch user details with role
-      const { data: userData } = await supabase
+      const byIdRes = await supabase
         .from('users')
-        .select('full_name, email, role:roles(name)')
+        .select('full_name, email, role')
         .eq('id', user.id)
-        .single()
+        .maybeSingle()
+      let userData: any = byIdRes.data
+      if (!userData) {
+        const byEmailRes = await supabase
+          .from('users')
+          .select('full_name, email, role')
+          .eq('email', (user.email || '').toLowerCase())
+          .maybeSingle()
+        userData = byEmailRes.data
+      }
 
       setUserName(userData?.full_name || userData?.email?.split('@')[0] || 'User')
-      setUserRole(userData?.role?.name || 'employee')
+      setUserRole(resolveRole(userData))
 
       // Fetch stats
       const [projectsRes, tasksRes, usersRes, milestonesRes] = await Promise.all([
@@ -165,7 +163,7 @@ export default function DashboardPage() {
           Welcome back, {userName}!
         </h3>
         <p className="text-muted-foreground">
-          {roleLabels[userRole]} Dashboard - Here&apos;s what&apos;s happening today.
+          {(userRole ? ROLE_LABELS[userRole] : 'User')} Dashboard - Here&apos;s what&apos;s happening today.
         </p>
       </div>
 

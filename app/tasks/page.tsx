@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { SmartAssignModal } from '@/components/tasks/smart-assign-modal'
+import { hasPermission, isFullAccessRole } from '@/lib/rbac'
 
 type Task = {
   id: string
@@ -43,7 +44,7 @@ type TeamMember = {
 export default function TasksPage() {
   const supabase = createClient()
   const router = useRouter()
-  const [userRole, setUserRole] = useState<string | null>(null)
+  const [userRole, setUserRole] = useState<any>(null)
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
   const [filterStatus, setFilterStatus] = useState<string | null>(null)
@@ -54,7 +55,8 @@ export default function TasksPage() {
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
 
   // Team Lead can assign tasks to developers
-  const canAssignTask = userRole && ['super_admin', 'project_manager', 'team_lead'].includes(userRole)
+  const canAssignTask = !!userRole && (isFullAccessRole(userRole) || hasPermission(userRole, 'ASSIGN_TASK'))
+  const canViewAll = !!userRole && isFullAccessRole(userRole)
 
   useEffect(() => {
     async function init() {
@@ -64,38 +66,12 @@ export default function TasksPage() {
         return
       }
 
-      // Fetch user's role
-      const { data: userData } = await supabase
-        .from('users')
-        .select('role:roles(name)')
-        .eq('id', user.id)
-        .single()
-
-      if (userData?.role?.name) {
-        setUserRole(userData.role.name)
-      }
-
-      // Fetch all tasks with relations
-      const { data: tasksData } = await supabase
-        .from('tasks')
-        .select(`
-          *,
-          assignee:users!tasks_assignee_id_fkey (full_name, email),
-          modules (name),
-          projects (name)
-        `)
-        .order('created_at', { ascending: false })
-
-      setTasks((tasksData as Task[]) || [])
-
-      // Fetch team members for assignee dropdown
-      const { data: usersData } = await supabase
-        .from('users')
-        .select('id, full_name, email')
-        .eq('is_active', true)
-        .order('full_name')
-
-      setTeamMembers(usersData || [])
+      const tasksApiRes = await fetch('/api/tasks')
+      const tasksApiJson = await tasksApiRes.json()
+      if (!tasksApiRes.ok) throw new Error(tasksApiJson.error || 'Failed to load tasks')
+      setUserRole(tasksApiJson.role || null)
+      setTasks((tasksApiJson.tasks as Task[]) || [])
+      setTeamMembers(tasksApiJson.assignees || [])
       setLoading(false)
     }
 
@@ -104,14 +80,15 @@ export default function TasksPage() {
 
   const handleStatusChange = async (taskId: string, newStatus: string) => {
     try {
-      const { error } = await supabase
-        .from('tasks')
-        .update({ status: newStatus })
-        .eq('id', taskId)
+      const statusRes = await fetch('/api/tasks', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId, status: newStatus }),
+      })
+      const statusJson = await statusRes.json()
+      if (!statusRes.ok) throw new Error(statusJson.error || 'Failed to update task')
 
-      if (error) throw error
-
-      setTasks(tasks.map(task => 
+      setTasks(tasks.map(task =>
         task.id === taskId ? { ...task, status: newStatus } : task
       ))
     } catch (error: any) {
@@ -175,6 +152,7 @@ export default function TasksPage() {
   return (
     <DashboardLayout 
       title="Tasks"
+      subtitle={canViewAll ? 'All tasks' : 'Your permitted task scope'}
       actions={
         <div className="flex items-center gap-3">
           <select

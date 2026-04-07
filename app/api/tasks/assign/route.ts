@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
+import { hasPermission, isFullAccessRole, resolveRole } from '@/lib/rbac'
 
 const RESTRICTED_DESIGNATIONS = ['Super Admin', 'Delivery Manager']
 
@@ -7,8 +8,36 @@ export async function POST(request: NextRequest) {
   const supabase = await createClient()
   
   try {
+    const {
+      data: { user: authUser },
+    } = await supabase.auth.getUser()
+    if (!authUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+    const roleRes = await supabase
+      .from('users')
+      .select('id, role, designation')
+      .eq('id', authUser.id)
+      .single()
+    const actorRole = resolveRole(roleRes.data)
+
     const body = await request.json()
     const { taskId, assigneeId, estimatedHours, month, sprintId } = body
+    if (!isFullAccessRole(actorRole) && !hasPermission(actorRole, 'ASSIGN_TASK')) {
+      return NextResponse.json({ error: 'Not allowed to assign tasks' }, { status: 403 })
+    }
+
+    if (actorRole === 'team_lead' && assigneeId) {
+      const teamMemberRes = await supabase
+        .from('users')
+        .select('id')
+        .eq('id', assigneeId)
+        .eq('reporting_manager_id', authUser.id)
+        .single()
+      if (teamMemberRes.error || !teamMemberRes.data) {
+        return NextResponse.json({ error: 'Team Lead can assign only to their team members' }, { status: 403 })
+      }
+    }
+
 
     console.log('[v0 task assign] Request body:', { taskId, assigneeId, estimatedHours, month, sprintId })
 
