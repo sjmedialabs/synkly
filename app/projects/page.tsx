@@ -15,8 +15,8 @@ export default function ProjectsPage() {
   const [loading, setLoading] = useState(true)
   const [userRole, setUserRole] = useState<string | null>(null)
 
-  // Only Super Admin, Project Manager, and Delivery Manager can create projects
-  const canCreateProject = userRole && ['super_admin', 'project_manager', 'delivery_manager'].includes(userRole)
+  // Master Admin, Client Admin, and Manager can create projects
+  const canCreateProject = userRole && ['master_admin', 'client_admin', 'manager'].includes(userRole)
 
   useEffect(() => {
     async function getUser() {
@@ -26,15 +26,15 @@ export default function ProjectsPage() {
         return
       }
 
-      // Fetch user's role
+      // Fetch user's role via role_id join
       const { data: userData } = await supabase
         .from('users')
-        .select('role')
+        .select('role_id, roles:role_id (name)')
         .eq('id', user.id)
         .single()
 
-      if (userData?.role) {
-        setUserRole(userData.role)
+      if (userData?.roles?.name) {
+        setUserRole(userData.roles.name)
       }
 
       // RBAC-enforced project list from backend API
