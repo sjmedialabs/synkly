@@ -69,7 +69,7 @@ export async function GET() {
       }
     }
     
-    // Return all users (backward compatible with old schema)
+    // Return all users with role join
     let allUsers: any[] | null = null
     let fetchError: any = null
     const modernQuery = await adminClient
@@ -78,41 +78,45 @@ export async function GET() {
         id,
         email,
         full_name,
-        role,
-        department,
-        designation,
+        role_id,
+        roles:role_id (id, name, description),
         department_id,
+        department:department_id (id, name),
         division_id,
+        division:division_id (id, name),
         designation_id,
+        designation:designation_id (id, name),
+        client_id,
         tenant_id,
+        status,
         is_active,
         created_at,
         experience_years,
         skillset,
-        reporting_manager_id
+        reporting_manager_id,
+        reporting_manager:reporting_manager_id (id, full_name, email)
       `)
       .order('created_at', { ascending: false })
     allUsers = modernQuery.data as any[] | null
     fetchError = modernQuery.error
 
     if (fetchError) {
-      const legacyQuery = await adminClient
+      console.error('[team API] Modern query failed, trying simplified:', fetchError)
+      const simpleQuery = await adminClient
         .from('users')
         .select(`
           id,
           email,
           full_name,
-          department,
-          designation,
+          role_id,
+          client_id,
+          status,
           is_active,
-          created_at,
-          experience_years,
-          skillset,
-          reporting_manager_id
+          created_at
         `)
         .order('created_at', { ascending: false })
-      allUsers = legacyQuery.data as any[] | null
-      fetchError = legacyQuery.error
+      allUsers = simpleQuery.data as any[] | null
+      fetchError = simpleQuery.error
     }
     
     if (fetchError) {
@@ -133,10 +137,14 @@ export async function GET() {
       }
     }
 
-    const adaptedUsers = visibleUsers.map((user) => ({
+    const adaptedUsers = visibleUsers.map((user: any) => ({
       ...user,
-      role: resolveRole(user),
+      role: user.roles?.name || resolveRole(user),
       name: user.full_name || null,
+      department_name: user.department?.name || null,
+      division_name: user.division?.name || null,
+      designation_name: user.designation?.name || null,
+      reporting_manager_name: user.reporting_manager?.full_name || null,
     }))
     console.log('[team API] Successfully fetched users:', adaptedUsers.length || 0)
     return NextResponse.json({ users: adaptedUsers, synced: missingUsers.length })
