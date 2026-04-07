@@ -20,29 +20,49 @@ export const ROLE_LABELS: Record<RoleKey, string> = {
 }
 
 export const ROLE_DESCRIPTIONS: Record<RoleKey, string> = {
-  master_admin: 'Full system access across all clients',
-  client_admin: 'Manage own client organization and teams',
-  manager: 'Create and manage projects within the organization',
-  team_lead: 'Lead teams and assign tasks to members',
+  master_admin: 'Full system access across all clients (Platform Super Admin)',
+  client_admin: 'Full access within organization - create users, manage projects, teams, and settings (Client Super Admin)',
+  manager: 'Create and manage projects, assign tasks within the organization',
+  team_lead: 'Lead teams and assign tasks to team members',
   member: 'Work on assigned tasks and update progress',
 }
 
 export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
   master_admin: ['ALL'],
   client_admin: [
+    'ALL_CLIENT', // Full access within client scope - Super Admin for their organization
     'VIEW_ALL_CLIENTS',
     'MANAGE_OWN_CLIENT',
     'CREATE_USER',
-    'UPDATE_USER', 
+    'UPDATE_USER',
+    'DELETE_USER',
     'VIEW_USER',
+    'ASSIGN_ROLE',
     'CREATE_PROJECT',
     'UPDATE_PROJECT',
     'DELETE_PROJECT',
     'VIEW_PROJECT',
     'CREATE_TEAM',
     'UPDATE_TEAM',
+    'DELETE_TEAM',
     'VIEW_TEAM',
+    'CREATE_TASK',
+    'UPDATE_TASK',
+    'DELETE_TASK',
+    'VIEW_TASK',
+    'ASSIGN_TASK',
+    'CREATE_SPRINT',
+    'UPDATE_SPRINT',
+    'DELETE_SPRINT',
+    'VIEW_SPRINT',
+    'CREATE_MILESTONE',
+    'UPDATE_MILESTONE',
+    'DELETE_MILESTONE',
+    'VIEW_MILESTONE',
+    'MANAGE_MASTER_DATA',
     'VIEW_REPORTS',
+    'EXPORT_DATA',
+    'MANAGE_SETTINGS',
   ],
   manager: [
     'CREATE_PROJECT',
@@ -135,7 +155,17 @@ export function isFullAccessRole(role: RoleKey | null): boolean {
   return role === 'master_admin'
 }
 
+// Client Admin is Super Admin within their client scope
+export function isClientSuperAdmin(role: RoleKey | null): boolean {
+  return role === 'client_admin'
+}
+
 export function isAdminRole(role: RoleKey | null): boolean {
+  return role === 'master_admin' || role === 'client_admin'
+}
+
+// Check if user has full access within a client scope
+export function hasFullClientAccess(role: RoleKey | null): boolean {
   return role === 'master_admin' || role === 'client_admin'
 }
 
@@ -143,12 +173,36 @@ export function canManageUsers(role: RoleKey | null): boolean {
   return role === 'master_admin' || role === 'client_admin'
 }
 
+export function canDeleteUsers(role: RoleKey | null): boolean {
+  return role === 'master_admin' || role === 'client_admin'
+}
+
+export function canAssignRoles(role: RoleKey | null): boolean {
+  return role === 'master_admin' || role === 'client_admin'
+}
+
 export function canManageProjects(role: RoleKey | null): boolean {
+  return role === 'master_admin' || role === 'client_admin' || role === 'manager'
+}
+
+export function canDeleteProjects(role: RoleKey | null): boolean {
   return role === 'master_admin' || role === 'client_admin' || role === 'manager'
 }
 
 export function canAssignTasks(role: RoleKey | null): boolean {
   return role === 'master_admin' || role === 'client_admin' || role === 'manager' || role === 'team_lead'
+}
+
+export function canManageMasterData(role: RoleKey | null): boolean {
+  return role === 'master_admin' || role === 'client_admin'
+}
+
+export function canManageSettings(role: RoleKey | null): boolean {
+  return role === 'master_admin' || role === 'client_admin'
+}
+
+export function canExportData(role: RoleKey | null): boolean {
+  return role === 'master_admin' || role === 'client_admin'
 }
 
 // User type with role info

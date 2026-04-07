@@ -73,16 +73,22 @@ const menuConfig: Record<RoleKey, MenuItem[]> = {
   client_admin: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { label: 'Organization', href: '/organization', icon: Building2 },
-    { label: 'Users', href: '/organization/users', icon: UserCog },
+    { label: 'Team Management', href: '/team', icon: UsersRound },
     { label: 'Projects', href: '/projects', icon: FolderKanban },
     { label: 'Tasks', href: '/tasks', icon: CheckSquare },
-    { label: 'Team', href: '/team', icon: UsersRound },
+    { label: 'Milestones', href: '/milestones', icon: Milestone },
+    { label: 'Sprints', href: '/sprints', icon: Target },
     { label: 'Capacity', href: '/capacity', icon: Clock },
     { label: 'Utilization', href: '/utilization', icon: PieChart },
     { label: 'Risks', href: '/risks', icon: ShieldAlert },
-    { label: 'Milestones', href: '/milestones', icon: Milestone },
-    { label: 'Sprints', href: '/sprints', icon: Target },
     { label: 'Reports', href: '/reports', icon: BarChart3 },
+    {
+      label: 'Settings', href: '/organization/settings', icon: Settings,
+      children: [
+        { label: 'Master Data', href: '/organization/settings', icon: Database },
+        { label: 'Users', href: '/organization/users', icon: UserCog },
+      ]
+    },
   ],
   manager: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },

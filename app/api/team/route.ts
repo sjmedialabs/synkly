@@ -253,10 +253,22 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Failed to create team member' }, { status: 500 })
     }
 
+    // Get role_id if role is provided
+    let roleId = null
+    if (role) {
+      const { data: roleData } = await adminClient
+        .from('roles')
+        .select('id')
+        .eq('name', role)
+        .single()
+      roleId = roleData?.id || null
+    }
+
     const modernPayload = {
       id: userId,
       email,
       full_name,
+      role_id: roleId,
       department: department || null,
       department_id: department_id || null,
       division_id: division_id || null,
@@ -374,7 +386,18 @@ export async function PUT(request: NextRequest) {
       ? (Array.isArray(skillset) ? skillset : skillset.split(',').map((s: string) => s.trim()).filter(Boolean))
       : null
 
-    const modernUpdate = {
+    // Get role_id if role is provided (only admins can change roles)
+    let roleId = undefined
+    if (role && (isPlatformMasterAdmin || isClientAdmin)) {
+      const { data: roleData } = await adminClient
+        .from('roles')
+        .select('id')
+        .eq('name', role)
+        .single()
+      roleId = roleData?.id || undefined
+    }
+
+    const modernUpdate: Record<string, any> = {
       full_name,
       department_id: department_id || null,
       division_id: division_id || null,
@@ -384,6 +407,11 @@ export async function PUT(request: NextRequest) {
       reporting_manager_id: reporting_manager_id || null,
       is_active,
       updated_at: new Date().toISOString(),
+    }
+    
+    // Only add role_id if it was resolved (admin changing role)
+    if (roleId !== undefined) {
+      modernUpdate.role_id = roleId
     }
 
     const simpleUpdate = {
