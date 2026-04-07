@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { normalizeRole } from '@/lib/rbac'
+import { type RoleKey, ROLE_LABELS } from '@/lib/rbac'
 import {
   LayoutDashboard,
   FolderKanban,
@@ -14,7 +14,6 @@ import {
   LogOut,
   Milestone,
   Target,
-  FileText,
   BarChart3,
   Building2,
   Clock,
@@ -23,35 +22,25 @@ import {
   ShieldAlert,
   Database,
   ChevronRight,
+  Shield,
+  Briefcase,
+  UserCog,
 } from 'lucide-react'
 
 interface UserWithRole {
   id: string
   email: string
   full_name: string | null
-  role: string | null
+  role_name: RoleKey | null
+  client_id: string | null
 }
 
-const roleLabels: Record<string, string> = {
-  master_admin: 'Master Admin',
-  super_admin: 'Super Admin',
-  project_manager: 'Project Manager',
-  delivery_manager: 'Delivery Manager',
-  team_lead: 'Team Lead',
-  senior: 'Senior',
-  junior: 'Junior',
-  trainee: 'Trainee',
-}
-
-const roleColors: Record<string, string> = {
+const roleColors: Record<RoleKey, string> = {
   master_admin: 'bg-rose-600',
-  super_admin: 'bg-red-500',
-  project_manager: 'bg-primary',
-  delivery_manager: 'bg-cyan-500',
-  team_lead: 'bg-green-500',
-  senior: 'bg-purple-500',
-  junior: 'bg-violet-500',
-  trainee: 'bg-amber-500',
+  client_admin: 'bg-blue-600',
+  manager: 'bg-emerald-600',
+  team_lead: 'bg-amber-600',
+  member: 'bg-violet-600',
 }
 
 type MenuItem = {
@@ -62,15 +51,15 @@ type MenuItem = {
 }
 
 // Define menu items per role
-const menuConfig: Record<string, MenuItem[]> = {
+const menuConfig: Record<RoleKey, MenuItem[]> = {
   master_admin: [
+    { label: 'Admin Dashboard', href: '/admin', icon: Shield },
+    { label: 'Clients', href: '/admin/clients', icon: Building2 },
+    { label: 'All Users', href: '/admin/users', icon: Users },
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { label: 'Projects', href: '/projects', icon: FolderKanban },
     { label: 'Tasks', href: '/tasks', icon: CheckSquare },
-    { label: 'Team', href: '/team', icon: Users },
-    { label: 'Capacity', href: '/capacity', icon: Clock },
-    { label: 'Utilization', href: '/utilization', icon: PieChart },
-    { label: 'Risks', href: '/risks', icon: ShieldAlert },
+    { label: 'Team', href: '/team', icon: UsersRound },
     { label: 'Milestones', href: '/milestones', icon: Milestone },
     { label: 'Sprints', href: '/sprints', icon: Target },
     { label: 'Reports', href: '/reports', icon: BarChart3 },
@@ -81,29 +70,13 @@ const menuConfig: Record<string, MenuItem[]> = {
       ]
     },
   ],
-  super_admin: [
+  client_admin: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+    { label: 'Organization', href: '/organization', icon: Building2 },
+    { label: 'Users', href: '/organization/users', icon: UserCog },
     { label: 'Projects', href: '/projects', icon: FolderKanban },
     { label: 'Tasks', href: '/tasks', icon: CheckSquare },
-    { label: 'Team', href: '/team', icon: Users },
-    { label: 'Capacity', href: '/capacity', icon: Clock },
-    { label: 'Utilization', href: '/utilization', icon: PieChart },
-    { label: 'Risks', href: '/risks', icon: ShieldAlert },
-    { label: 'Milestones', href: '/milestones', icon: Milestone },
-    { label: 'Sprints', href: '/sprints', icon: Target },
-    { label: 'Reports', href: '/reports', icon: BarChart3 },
-    {
-      label: 'Settings', href: '/settings', icon: Settings,
-      children: [
-        { label: 'Master Data', href: '/settings/master-data', icon: Database },
-      ]
-    },
-  ],
-  project_manager: [
-    { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { label: 'Projects', href: '/projects', icon: FolderKanban },
-    { label: 'Tasks', href: '/tasks', icon: CheckSquare },
-    { label: 'Team', href: '/team', icon: Users },
+    { label: 'Team', href: '/team', icon: UsersRound },
     { label: 'Capacity', href: '/capacity', icon: Clock },
     { label: 'Utilization', href: '/utilization', icon: PieChart },
     { label: 'Risks', href: '/risks', icon: ShieldAlert },
@@ -111,9 +84,11 @@ const menuConfig: Record<string, MenuItem[]> = {
     { label: 'Sprints', href: '/sprints', icon: Target },
     { label: 'Reports', href: '/reports', icon: BarChart3 },
   ],
-  delivery_manager: [
+  manager: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { label: 'Projects', href: '/projects', icon: FolderKanban },
+    { label: 'Tasks', href: '/tasks', icon: CheckSquare },
+    { label: 'Team', href: '/team', icon: UsersRound },
     { label: 'Capacity', href: '/capacity', icon: Clock },
     { label: 'Utilization', href: '/utilization', icon: PieChart },
     { label: 'Risks', href: '/risks', icon: ShieldAlert },
@@ -126,21 +101,13 @@ const menuConfig: Record<string, MenuItem[]> = {
     { label: 'My Team', href: '/my-team', icon: UsersRound },
     { label: 'Projects', href: '/projects', icon: FolderKanban },
     { label: 'Tasks', href: '/tasks', icon: CheckSquare },
-    { label: 'Team', href: '/team', icon: Users },
     { label: 'Capacity', href: '/capacity', icon: Clock },
     { label: 'Sprints', href: '/sprints', icon: Target },
   ],
-  senior: [
+  member: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { label: 'My Tasks', href: '/tasks', icon: CheckSquare },
-  ],
-  junior: [
-    { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { label: 'My Tasks', href: '/tasks', icon: CheckSquare },
-  ],
-  trainee: [
-    { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { label: 'My Tasks', href: '/tasks', icon: CheckSquare },
+    { label: 'Projects', href: '/projects', icon: FolderKanban },
   ],
 }
 
@@ -168,32 +135,27 @@ export function Sidebar() {
         return
       }
 
-      const byIdRes = await supabase
+      const { data: userData } = await supabase
         .from('users')
         .select(`
           id,
           email,
           full_name,
-          role
+          client_id,
+          roles (name)
         `)
         .eq('id', authUser.id)
-        .maybeSingle()
-      let userData: UserWithRole | null = byIdRes.data as UserWithRole | null
-      if (!userData) {
-        const byEmailRes = await supabase
-          .from('users')
-          .select(`
-            id,
-            email,
-            full_name,
-            role
-          `)
-          .eq('email', (authUser.email || '').toLowerCase())
-          .maybeSingle()
-        userData = byEmailRes.data as UserWithRole | null
-      }
+        .single()
 
-      setUser(userData)
+      if (userData) {
+        setUser({
+          id: userData.id,
+          email: userData.email,
+          full_name: userData.full_name,
+          role_name: (userData.roles as any)?.name as RoleKey | null,
+          client_id: userData.client_id,
+        })
+      }
       setLoading(false)
     }
 
@@ -220,8 +182,8 @@ export function Sidebar() {
     )
   }
 
-  const roleName = normalizeRole(user?.role)
-  const menuItems = roleName ? (menuConfig[roleName] || []) : []
+  const roleName = user?.role_name
+  const menuItems = roleName ? (menuConfig[roleName] || menuConfig.member) : menuConfig.member
 
   const toggleExpanded = (href: string) => {
     setExpandedItems(prev =>
@@ -233,19 +195,21 @@ export function Sidebar() {
     <div className="h-full bg-card border-r border-border p-6 flex flex-col">
       {/* Logo */}
       <div className="flex items-center gap-2 mb-2">
-        <div className="w-8 h-8 bg-primary rounded-lg"></div>
+        <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
+          <span className="text-primary-foreground font-bold text-sm">S</span>
+        </div>
         <h1 className="font-bold text-lg text-foreground">synkly</h1>
       </div>
 
       {/* Role Badge */}
       <div className="mb-6">
         <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium text-white ${roleName ? roleColors[roleName] : 'bg-gray-500'}`}>
-          {roleName ? (roleLabels[roleName] || roleName) : 'No Role'}
+          {roleName ? ROLE_LABELS[roleName] : 'No Role'}
         </span>
       </div>
 
       {/* Navigation */}
-      <nav className="space-y-1 flex-1">
+      <nav className="space-y-1 flex-1 overflow-y-auto">
         {menuItems.map((item) => {
           const Icon = item.icon
           const isActive = pathname === item.href

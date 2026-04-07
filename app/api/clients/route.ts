@@ -1,16 +1,53 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAdminClient, getAuthContext } from '@/lib/rbac-server'
-import { ROLE_PERMISSIONS } from '@/lib/rbac'
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
+// GET /api/clients - List all clients (master admin only)
+export async function GET() {
+  try {
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+    // Only master admin can list all clients
+    if (!ctx.isMasterAdmin) {
+      // Client admin can only see their own client
+      if (ctx.isClientAdmin && ctx.clientId) {
+        const adminClient = getAdminClient()
+        const { data, error } = await adminClient
+          .from('clients')
+          .select('id, name, email, company, phone, address, is_active, created_at')
+          .eq('id', ctx.clientId)
+          .single()
+        
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+        return NextResponse.json({ clients: [data] })
+      }
+      return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    }
+
+    const adminClient = getAdminClient()
+    const { data, error } = await adminClient
+      .from('clients')
+      .select('id, name, email, company, phone, address, is_active, created_at')
+      .order('name', { ascending: true })
+
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ clients: data || [] })
+  } catch (err: any) {
+    console.error('[clients API] GET error:', err)
+    return NextResponse.json({ error: err?.message || 'Internal server error' }, { status: 500 })
+  }
+}
+
+// POST /api/clients - Create a new client with client admin (master admin only)
 export async function POST(request: NextRequest) {
   try {
     const ctx = await getAuthContext()
     if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    const isPlatformMasterAdmin = ctx.role === 'master_admin' && !ctx.tenantId
-    if (!isPlatformMasterAdmin) {
+    // Only master admin can create clients
+    if (!ctx.isMasterAdmin) {
       return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
     }
 
@@ -20,104 +57,110 @@ export async function POST(request: NextRequest) {
     const phone = String(body.phone || '').trim() || null
     const company = String(body.company || '').trim() || null
     const address = String(body.address || '').trim() || null
-    const superAdminEmail = String(body.super_admin_email || '').trim().toLowerCase()
-    const superAdminName = String(body.super_admin_name || '').trim()
-    const superAdminPassword = String(body.super_admin_password || '')
+    const clientAdminEmail = String(body.client_admin_email || '').trim().toLowerCase()
+    const clientAdminName = String(body.client_admin_name || '').trim()
+    const clientAdminPassword = String(body.client_admin_password || '')
 
     if (!name) return NextResponse.json({ error: 'Client name is required' }, { status: 400 })
-    if (!superAdminEmail || !emailRegex.test(superAdminEmail)) {
-      return NextResponse.json({ error: 'Valid super_admin_email is required' }, { status: 400 })
+    if (!clientAdminEmail || !emailRegex.test(clientAdminEmail)) {
+      return NextResponse.json({ error: 'Valid client_admin_email is required' }, { status: 400 })
     }
 
     const adminClient = getAdminClient()
 
-    // Create tenant/client in a schema-safe way.
-    let tenantId: string | null = null
-    const tenantRes = await adminClient
-      .from('tenants')
-      .insert({ name } as any)
-      .select('id, name')
-      .single()
-    if (!tenantRes.error) {
-      tenantId = tenantRes.data?.id || null
-    }
-
-    let clientRes = await adminClient
+    // Create client
+    const { data: clientData, error: clientError } = await adminClient
       .from('clients')
-      .insert({ name, email, phone, company, address, is_active: true } as any)
+      .insert({ 
+        name, 
+        email, 
+        phone, 
+        company, 
+        address, 
+        is_active: true 
+      })
       .select('id, name, email, company')
       .single()
-    if (clientRes.error) {
-      clientRes = await adminClient
-        .from('clients')
-        .insert({ name, email, phone, company, is_active: true } as any)
-        .select('id, name, email, company')
-        .single()
-    }
-    if (clientRes.error) {
-      return NextResponse.json({ error: clientRes.error.message }, { status: 500 })
-    }
-    if (!tenantId) tenantId = clientRes.data?.id || null
 
-    // Ensure super admin auth account does not already exist.
+    if (clientError) {
+      return NextResponse.json({ error: clientError.message }, { status: 500 })
+    }
+
+    const clientId = clientData.id
+
+    // Check if client admin email already exists
     const {
       data: { users: authUsers },
     } = await adminClient.auth.admin.listUsers({ page: 1, perPage: 1000 })
-    if (authUsers?.some((u) => (u.email || '').toLowerCase() === superAdminEmail)) {
-      return NextResponse.json({ error: 'Super admin email already exists' }, { status: 409 })
+    if (authUsers?.some((u) => (u.email || '').toLowerCase() === clientAdminEmail)) {
+      return NextResponse.json({ error: 'Client admin email already exists' }, { status: 409 })
     }
 
+    // Get client_admin role id
+    const { data: roleData } = await adminClient
+      .from('roles')
+      .select('id')
+      .eq('name', 'client_admin')
+      .single()
+
+    // Create client admin auth account
     const createAuth = await adminClient.auth.admin.createUser({
-      email: superAdminEmail,
-      email_confirm: Boolean(superAdminPassword),
-      password: superAdminPassword || undefined,
+      email: clientAdminEmail,
+      email_confirm: Boolean(clientAdminPassword),
+      password: clientAdminPassword || undefined,
       user_metadata: {
-        full_name: superAdminName || null,
-        role: 'super_admin',
-        tenant_id: tenantId,
+        full_name: clientAdminName || null,
+        role: 'client_admin',
       },
     })
+
     if (createAuth.error || !createAuth.data.user?.id) {
+      // Clean up: delete the client we just created
+      await adminClient.from('clients').delete().eq('id', clientId)
       return NextResponse.json(
-        { error: createAuth.error?.message || 'Failed to create super admin auth user' },
+        { error: createAuth.error?.message || 'Failed to create client admin auth user' },
         { status: 500 },
       )
     }
 
-    const superAdminId = createAuth.data.user.id
-    const userUpsert = await adminClient
+    const clientAdminId = createAuth.data.user.id
+
+    // Create/update user profile with client_id and role
+    const { data: userData, error: userError } = await adminClient
       .from('users')
       .upsert(
         {
-          id: superAdminId,
-          email: superAdminEmail,
-          full_name: superAdminName || superAdminEmail.split('@')[0],
-          role: 'super_admin',
-          tenant_id: tenantId,
-          is_active: true,
-          permissions: ROLE_PERMISSIONS.super_admin,
-        } as any,
+          id: clientAdminId,
+          email: clientAdminEmail,
+          full_name: clientAdminName || clientAdminEmail.split('@')[0],
+          role_id: roleData?.id,
+          client_id: clientId,
+          status: 'active',
+        },
         { onConflict: 'id' },
       )
-      .select('id, email, full_name, role, tenant_id')
+      .select('id, email, full_name, client_id')
       .single()
-    if (userUpsert.error) {
-      await adminClient.auth.admin.deleteUser(superAdminId)
-      return NextResponse.json({ error: userUpsert.error.message }, { status: 500 })
+
+    if (userError) {
+      // Clean up: delete auth user and client
+      await adminClient.auth.admin.deleteUser(clientAdminId)
+      await adminClient.from('clients').delete().eq('id', clientId)
+      return NextResponse.json({ error: userError.message }, { status: 500 })
     }
 
-    if (!superAdminPassword) {
-      await adminClient.auth.admin.inviteUserByEmail(superAdminEmail, {
+    // Send invite email if no password was provided
+    if (!clientAdminPassword) {
+      await adminClient.auth.admin.inviteUserByEmail(clientAdminEmail, {
         redirectTo: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/set-password`,
-        data: { role: 'super_admin', tenant_id: tenantId },
+        data: { role: 'client_admin', client_id: clientId },
       })
     }
 
     return NextResponse.json(
       {
-        client: clientRes.data,
-        tenant_id: tenantId,
-        super_admin: userUpsert.data,
+        client: clientData,
+        client_admin: userData,
       },
       { status: 201 },
     )
@@ -126,4 +169,3 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: err?.message || 'Internal server error' }, { status: 500 })
   }
 }
-
