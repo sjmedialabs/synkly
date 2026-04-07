@@ -14,63 +14,44 @@ import { Label } from '@/components/ui/label'
 import Link from 'next/link'
 import { useRouter, useParams } from 'next/navigation'
 import { useState } from 'react'
-import { Shield, Briefcase, Users, Code, Building2, CheckCircle2 } from 'lucide-react'
+import { Shield, Building2, Briefcase, Users, User, Loader2 } from 'lucide-react'
+import { ROLE_LABELS, ROLE_DESCRIPTIONS, type RoleKey } from '@/lib/rbac'
 
 const roleConfig: Record<string, {
-  name: string
-  dbName: string
-  description: string
+  key: RoleKey
   icon: React.ElementType
   color: string
   bgColor: string
 }> = {
-  'super-admin': {
-    name: 'Super Admin',
-    dbName: 'super_admin',
-    description: 'Full system access and control',
+  'master-admin': {
+    key: 'master_admin',
     icon: Shield,
-    color: 'text-red-500',
-    bgColor: 'bg-red-500',
+    color: 'text-rose-600',
+    bgColor: 'bg-rose-600',
   },
-  'project-manager': {
-    name: 'Project Manager',
-    dbName: 'project_manager',
-    description: 'Manage projects, teams, and deadlines',
+  'client-admin': {
+    key: 'client_admin',
+    icon: Building2,
+    color: 'text-blue-600',
+    bgColor: 'bg-blue-600',
+  },
+  'manager': {
+    key: 'manager',
     icon: Briefcase,
-    color: 'text-primary',
-    bgColor: 'bg-primary',
-  },
-  'delivery-manager': {
-    name: 'Delivery Manager',
-    dbName: 'delivery_manager',
-    description: 'Manage milestones and delivery',
-    icon: CheckCircle2,
-    color: 'text-cyan-500',
-    bgColor: 'bg-cyan-500',
+    color: 'text-emerald-600',
+    bgColor: 'bg-emerald-600',
   },
   'team-lead': {
-    name: 'Team Lead',
-    dbName: 'team_lead',
-    description: 'Lead teams and assign tasks',
+    key: 'team_lead',
     icon: Users,
-    color: 'text-green-500',
-    bgColor: 'bg-green-500',
+    color: 'text-amber-600',
+    bgColor: 'bg-amber-600',
   },
-  'developer': {
-    name: 'Developer',
-    dbName: 'employee',
-    description: 'Work on assigned tasks and projects',
-    icon: Code,
-    color: 'text-purple-500',
-    bgColor: 'bg-purple-500',
-  },
-  'client': {
-    name: 'Client',
-    dbName: 'client',
-    description: 'View project progress and reports',
-    icon: Building2,
-    color: 'text-accent',
-    bgColor: 'bg-accent',
+  'member': {
+    key: 'member',
+    icon: User,
+    color: 'text-violet-600',
+    bgColor: 'bg-violet-600',
   },
 }
 
@@ -103,6 +84,8 @@ export default function RoleSignUpPage() {
   }
 
   const Icon = config.icon
+  const roleLabel = ROLE_LABELS[config.key]
+  const roleDescription = ROLE_DESCRIPTIONS[config.key]
 
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -110,36 +93,46 @@ export default function RoleSignUpPage() {
     setIsLoading(true)
     setError(null)
 
+    // Validate passwords
     if (password !== repeatPassword) {
       setError('Passwords do not match')
       setIsLoading(false)
       return
     }
 
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters')
+      setIsLoading(false)
+      return
+    }
+
+    // Normalize email
+    const normalizedEmail = email.trim().toLowerCase()
+
     try {
       // Sign up with role metadata
       const { data: authData, error: authError } = await supabase.auth.signUp({
-        email,
+        email: normalizedEmail,
         password,
         options: {
           emailRedirectTo:
             process.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL ||
             `${window.location.origin}/dashboard`,
           data: {
-            full_name: fullName,
-            role: config.dbName,
+            full_name: fullName.trim(),
+            role: config.key,
           },
         },
       })
 
       if (authError) throw authError
 
-      // After signup, update the user's role in the users table
+      // Update user role in the users table (trigger should have created the row)
       if (authData.user) {
         const { data: roleData } = await supabase
           .from('roles')
           .select('id')
-          .eq('name', config.dbName)
+          .eq('name', config.key)
           .single()
 
         if (roleData) {
@@ -147,7 +140,7 @@ export default function RoleSignUpPage() {
             .from('users')
             .update({ 
               role_id: roleData.id,
-              full_name: fullName 
+              full_name: fullName.trim(),
             })
             .eq('id', authData.user.id)
         }
@@ -162,24 +155,26 @@ export default function RoleSignUpPage() {
   }
 
   return (
-    <div className="flex min-h-screen w-full items-center justify-center p-6 md:p-10 bg-gradient-to-br from-background to-secondary">
+    <div className="flex min-h-screen w-full items-center justify-center p-6 md:p-10 bg-gradient-to-br from-background to-secondary/30">
       <div className="w-full max-w-sm">
         <div className="flex flex-col gap-6">
           {/* Logo */}
           <div className="flex items-center justify-center gap-2 mb-4">
-            <div className="w-10 h-10 bg-primary rounded-lg"></div>
+            <div className="w-10 h-10 bg-primary rounded-lg flex items-center justify-center">
+              <span className="text-primary-foreground font-bold text-xl">S</span>
+            </div>
             <h1 className="text-2xl font-bold text-foreground">synkly</h1>
           </div>
 
           <Card className="border-border">
             <CardHeader>
               <div className="flex items-center gap-3 mb-2">
-                <div className={`${config.bgColor} p-2 rounded-lg text-white`}>
+                <div className={`${config.bgColor} p-2.5 rounded-lg text-white`}>
                   <Icon className="w-5 h-5" />
                 </div>
                 <div>
-                  <CardTitle className="text-xl">{config.name}</CardTitle>
-                  <CardDescription className="text-xs">{config.description}</CardDescription>
+                  <CardTitle className="text-xl">{roleLabel}</CardTitle>
+                  <CardDescription className="text-xs">{roleDescription}</CardDescription>
                 </div>
               </div>
             </CardHeader>
@@ -196,6 +191,7 @@ export default function RoleSignUpPage() {
                       value={fullName}
                       onChange={(e) => setFullName(e.target.value)}
                       className="border-border"
+                      autoComplete="name"
                     />
                   </div>
                   <div className="grid gap-2">
@@ -208,6 +204,7 @@ export default function RoleSignUpPage() {
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       className="border-border"
+                      autoComplete="email"
                     />
                   </div>
                   <div className="grid gap-2">
@@ -219,7 +216,10 @@ export default function RoleSignUpPage() {
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       className="border-border"
+                      autoComplete="new-password"
+                      minLength={8}
                     />
+                    <p className="text-xs text-muted-foreground">Minimum 8 characters</p>
                   </div>
                   <div className="grid gap-2">
                     <Label htmlFor="repeat-password">Confirm Password</Label>
@@ -230,15 +230,29 @@ export default function RoleSignUpPage() {
                       value={repeatPassword}
                       onChange={(e) => setRepeatPassword(e.target.value)}
                       className="border-border"
+                      autoComplete="new-password"
                     />
                   </div>
-                  {error && <p className="text-sm text-destructive">{error}</p>}
+                  
+                  {error && (
+                    <p className="text-sm text-destructive bg-destructive/10 p-2 rounded">
+                      {error}
+                    </p>
+                  )}
+                  
                   <Button
                     type="submit"
                     className={`w-full ${config.bgColor} hover:opacity-90 text-white`}
                     disabled={isLoading}
                   >
-                    {isLoading ? 'Creating account...' : `Sign up as ${config.name}`}
+                    {isLoading ? (
+                      <span className="flex items-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Creating account...
+                      </span>
+                    ) : (
+                      `Sign up as ${roleLabel}`
+                    )}
                   </Button>
                 </div>
                 <div className="mt-4 text-center text-sm space-y-2">

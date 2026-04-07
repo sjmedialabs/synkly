@@ -2,77 +2,73 @@
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import Link from 'next/link'
-import { Shield, Briefcase, Users, Code, Building2, CheckCircle2 } from 'lucide-react'
+import { Shield, Building2, Briefcase, Users, User } from 'lucide-react'
+import { ROLE_LABELS, ROLE_DESCRIPTIONS, type RoleKey } from '@/lib/rbac'
 
-const roles = [
+const roles: Array<{
+  id: string
+  key: RoleKey
+  icon: React.ElementType
+  color: string
+  href: string
+}> = [
   {
-    id: 'super-admin',
-    name: 'Super Admin',
-    description: 'Full system access and control',
+    id: 'master-admin',
+    key: 'master_admin',
     icon: Shield,
-    color: 'bg-red-500',
-    href: '/auth/sign-up/super-admin',
+    color: 'bg-rose-600',
+    href: '/auth/sign-up/master-admin',
   },
   {
-    id: 'project-manager',
-    name: 'Project Manager',
-    description: 'Manage projects, teams, and deadlines',
+    id: 'client-admin',
+    key: 'client_admin',
+    icon: Building2,
+    color: 'bg-blue-600',
+    href: '/auth/sign-up/client-admin',
+  },
+  {
+    id: 'manager',
+    key: 'manager',
     icon: Briefcase,
-    color: 'bg-primary',
-    href: '/auth/sign-up/project-manager',
-  },
-  {
-    id: 'delivery-manager',
-    name: 'Delivery Manager',
-    description: 'Manage milestones and delivery',
-    icon: CheckCircle2,
-    color: 'bg-cyan-500',
-    href: '/auth/sign-up/delivery-manager',
+    color: 'bg-emerald-600',
+    href: '/auth/sign-up/manager',
   },
   {
     id: 'team-lead',
-    name: 'Team Lead',
-    description: 'Lead teams and assign tasks',
+    key: 'team_lead',
     icon: Users,
-    color: 'bg-green-500',
+    color: 'bg-amber-600',
     href: '/auth/sign-up/team-lead',
   },
   {
-    id: 'developer',
-    name: 'Developer',
-    description: 'Work on assigned tasks and projects',
-    icon: Code,
-    color: 'bg-purple-500',
-    href: '/auth/sign-up/developer',
-  },
-  {
-    id: 'client',
-    name: 'Client',
-    description: 'View project progress and reports',
-    icon: Building2,
-    color: 'bg-accent',
-    href: '/auth/sign-up/client',
+    id: 'member',
+    key: 'member',
+    icon: User,
+    color: 'bg-violet-600',
+    href: '/auth/sign-up/member',
   },
 ]
 
 export default function SignUpPage() {
   return (
-    <div className="flex min-h-screen w-full items-center justify-center p-6 md:p-10 bg-gradient-to-br from-background to-secondary">
+    <div className="flex min-h-screen w-full items-center justify-center p-6 md:p-10 bg-gradient-to-br from-background to-secondary/30">
       <div className="w-full max-w-2xl">
         <div className="flex flex-col gap-6">
           {/* Logo */}
           <div className="flex items-center justify-center gap-2 mb-4">
-            <div className="w-10 h-10 bg-primary rounded-lg"></div>
+            <div className="w-10 h-10 bg-primary rounded-lg flex items-center justify-center">
+              <span className="text-primary-foreground font-bold text-xl">S</span>
+            </div>
             <h1 className="text-2xl font-bold text-foreground">synkly</h1>
           </div>
 
           <Card className="border-border">
             <CardHeader className="text-center">
               <CardTitle className="text-2xl">Create Your Account</CardTitle>
-              <CardDescription>Select your role to get started</CardDescription>
+              <CardDescription>Select your role to get started with Synkly</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <div className="grid gap-4 md:grid-cols-2">
                 {roles.map((role) => {
                   const Icon = role.icon
                   return (
@@ -81,15 +77,15 @@ export default function SignUpPage() {
                       href={role.href}
                       className="group flex items-start gap-4 p-4 rounded-lg border border-border hover:border-primary hover:bg-secondary/50 transition-all"
                     >
-                      <div className={`${role.color} p-3 rounded-lg text-white`}>
+                      <div className={`${role.color} p-3 rounded-lg text-white shrink-0`}>
                         <Icon className="w-5 h-5" />
                       </div>
-                      <div className="flex-1">
+                      <div className="flex-1 min-w-0">
                         <h3 className="font-semibold text-foreground group-hover:text-primary transition-colors">
-                          {role.name}
+                          {ROLE_LABELS[role.key]}
                         </h3>
-                        <p className="text-sm text-muted-foreground mt-1">
-                          {role.description}
+                        <p className="text-sm text-muted-foreground mt-1 line-clamp-2">
+                          {ROLE_DESCRIPTIONS[role.key]}
                         </p>
                       </div>
                     </Link>
