@@ -1,21 +1,20 @@
-import { createClient } from '@/lib/supabase/server'
+import { getAdminClient, getAuthContext } from '@/lib/rbac-server'
 import { NextRequest, NextResponse } from 'next/server'
-import { getAuthContext } from '@/lib/rbac-server'
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
-    const supabase = await createClient()
-    const authContext = await getAuthContext(supabase)
+    const authContext = await getAuthContext()
 
-    if (!authContext.user) {
+    if (!authContext.userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
     // Only client_admin or master_admin can manage designations
-    if (!['client_admin', 'master_admin'].includes(authContext.role)) {
+    if (!authContext.isClientAdmin && !authContext.isMasterAdmin) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
     }
 
+    const supabase = getAdminClient()
     const { data, error } = await supabase
       .from('master_designations')
       .select('*')
@@ -33,15 +32,14 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createClient()
-    const authContext = await getAuthContext(supabase)
+    const authContext = await getAuthContext()
 
-    if (!authContext.user) {
+    if (!authContext.userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
     // Only client_admin or master_admin can create designations
-    if (!['client_admin', 'master_admin'].includes(authContext.role)) {
+    if (!authContext.isClientAdmin && !authContext.isMasterAdmin) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
     }
 
@@ -52,6 +50,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Designation name is required' }, { status: 400 })
     }
 
+    const supabase = getAdminClient()
     const { data, error } = await supabase
       .from('master_designations')
       .insert({
