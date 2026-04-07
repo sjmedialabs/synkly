@@ -24,13 +24,14 @@ export async function GET() {
     const adminClient = getAdminClient()
     const actorRes = await adminClient
       .from('users')
-      .select('id, role, tenant_id')
+      .select('id, role_id, client_id, roles:role_id (name)')
       .eq('id', sessionUser.id)
       .single()
-    const actorRole = resolveRole(actorRes.data)
-    const actorTenantId = (actorRes.data as any)?.tenant_id || null
-    const isPlatformMasterAdmin = actorRole === 'master_admin' && !actorTenantId
-    const isFullAccess = actorRole === 'super_admin' || actorRole === 'project_manager' || actorRole === 'delivery_manager'
+    const actorRole = (actorRes.data as any)?.roles?.name || resolveRole(actorRes.data)
+    const actorClientId = (actorRes.data as any)?.client_id || null
+    const isPlatformMasterAdmin = actorRole === 'master_admin'
+    const isClientAdmin = actorRole === 'client_admin'
+    const isFullAccess = isPlatformMasterAdmin || isClientAdmin || actorRole === 'manager' || actorRole === 'team_lead'
     
     // Get all auth users
     const { data: authUsers, error: authError } = await adminClient.auth.admin.listUsers()
@@ -125,14 +126,20 @@ export async function GET() {
     }
     
     let visibleUsers = allUsers || []
-    if (!isPlatformMasterAdmin) {
-      if (!actorTenantId) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
-      visibleUsers = visibleUsers.filter((u: any) => u.tenant_id === actorTenantId)
+    // Master admin sees all users
+    // Client admin/manager sees users in their client
+    // Team lead sees their direct reports + self
+    // Member sees only self
+    if (!isPlatformMasterAdmin && actorClientId) {
+      visibleUsers = visibleUsers.filter((u: any) => u.client_id === actorClientId)
     }
-    if (!isPlatformMasterAdmin && !isFullAccess) {
-      if (actorRole === 'team_lead') {
+    if (!isPlatformMasterAdmin && !isClientAdmin) {
+      if (actorRole === 'manager') {
+        // Managers can see all users in their client (already filtered above)
+      } else if (actorRole === 'team_lead') {
         visibleUsers = visibleUsers.filter((u: any) => u.reporting_manager_id === sessionUser.id || u.id === sessionUser.id)
       } else {
+        // Members only see themselves
         visibleUsers = visibleUsers.filter((u: any) => u.id === sessionUser.id)
       }
     }
@@ -186,20 +193,17 @@ export async function POST(request: NextRequest) {
     const adminClient = getAdminClient()
     const actorRes = await adminClient
       .from('users')
-      .select('id, role, tenant_id')
+      .select('id, role_id, client_id, roles:role_id (name)')
       .eq('id', sessionUser.id)
       .single()
-    const actorRole = resolveRole(actorRes.data)
-    const actorTenantId = (actorRes.data as any)?.tenant_id || null
-    const isPlatformMasterAdmin = actorRole === 'master_admin' && !actorTenantId
-    const isTenantSuperAdmin = actorRole === 'super_admin' && !!actorTenantId
-    if (!isPlatformMasterAdmin && !isTenantSuperAdmin) {
+    const actorRole = (actorRes.data as any)?.roles?.name || resolveRole(actorRes.data)
+    const actorClientId = (actorRes.data as any)?.client_id || null
+    const isPlatformMasterAdmin = actorRole === 'master_admin'
+    const isClientAdmin = actorRole === 'client_admin'
+    if (!isPlatformMasterAdmin && !isClientAdmin) {
       return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
     }
-    const effectiveTenantId = isPlatformMasterAdmin ? (tenant_id || null) : actorTenantId
-    if (!effectiveTenantId) {
-      return NextResponse.json({ error: 'tenant_id is required' }, { status: 400 })
-    }
+    const effectiveClientId = isPlatformMasterAdmin ? (tenant_id || null) : actorClientId
     const skillsetArr = skillset && Array.isArray(skillset) ? skillset : []
 
     // Check if user already exists in auth
@@ -258,36 +262,19 @@ export async function POST(request: NextRequest) {
       division_id: division_id || null,
       designation: designation || null,
       designation_id: designation_id || null,
-      tenant_id: effectiveTenantId,
+      client_id: effectiveClientId,
       experience_years: experience_years || null,
       skillset: skillsetArr,
       reporting_manager_id: reporting_manager_id || null,
-      role: role || null,
       is_active,
     }
 
-    // Legacy-safe payload for schemas without *_id columns.
-    const legacyPayload = {
+    // Simplified payload for fallback
+    const simplePayload = {
       id: userId,
       email,
       full_name,
-      department: department || null,
-      designation: designation || null,
-      experience_years: experience_years || null,
-      skillset: skillsetArr,
-      reporting_manager_id: reporting_manager_id || null,
-      role: role || null,
-      is_active,
-    }
-    const legacyNoRolePayload = {
-      id: userId,
-      email,
-      full_name,
-      department: department || null,
-      designation: designation || null,
-      experience_years: experience_years || null,
-      skillset: skillsetArr,
-      reporting_manager_id: reporting_manager_id || null,
+      client_id: effectiveClientId,
       is_active,
     }
 
@@ -299,16 +286,10 @@ export async function POST(request: NextRequest) {
       .single()
 
     if (upsertRes.error?.code === '42703' || upsertRes.error?.code === 'PGRST204') {
+      console.log('[team API] Modern upsert failed, trying simple payload')
       upsertRes = await adminClient
         .from('users')
-        .upsert(legacyPayload as any, { onConflict: 'id' })
-        .select('*')
-        .single()
-    }
-    if (upsertRes.error?.code === '42703' || upsertRes.error?.code === 'PGRST204') {
-      upsertRes = await adminClient
-        .from('users')
-        .upsert(legacyNoRolePayload as any, { onConflict: 'id' })
+        .upsert(simplePayload as any, { onConflict: 'id' })
         .select('*')
         .single()
     }
@@ -363,24 +344,24 @@ export async function PUT(request: NextRequest) {
     const adminClient = getAdminClient()
     const actorRes = await adminClient
       .from('users')
-      .select('id, role, tenant_id')
+      .select('id, role_id, client_id, roles:role_id (name)')
       .eq('id', sessionUser.id)
       .single()
-    const actorRole = resolveRole(actorRes.data)
-    const actorTenantId = (actorRes.data as any)?.tenant_id || null
-    const isPlatformMasterAdmin = actorRole === 'master_admin' && !actorTenantId
-    const isTenantSuperAdmin = actorRole === 'super_admin' && !!actorTenantId
-    const isFullAccess = isTenantSuperAdmin || actorRole === 'project_manager' || actorRole === 'delivery_manager'
+    const actorRole = (actorRes.data as any)?.roles?.name || resolveRole(actorRes.data)
+    const actorClientId = (actorRes.data as any)?.client_id || null
+    const isPlatformMasterAdmin = actorRole === 'master_admin'
+    const isClientAdmin = actorRole === 'client_admin'
+    const isManager = actorRole === 'manager'
     const isTeamLead = actorRole === 'team_lead'
-    if (!isPlatformMasterAdmin && !actorTenantId) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
-    if (!isPlatformMasterAdmin && !isFullAccess && !isTeamLead) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    const canEdit = isPlatformMasterAdmin || isClientAdmin || isManager || isTeamLead
+    if (!canEdit) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
     const targetRes = await adminClient
       .from('users')
-      .select('id, tenant_id, reporting_manager_id')
+      .select('id, client_id, reporting_manager_id')
       .eq('id', id)
       .single()
     if (targetRes.error) return NextResponse.json({ error: 'User not found' }, { status: 404 })
-    if (!isPlatformMasterAdmin && targetRes.data?.tenant_id !== actorTenantId) {
+    if (!isPlatformMasterAdmin && targetRes.data?.client_id !== actorClientId) {
       return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
     }
     if (isTeamLead) {
@@ -395,38 +376,18 @@ export async function PUT(request: NextRequest) {
 
     const modernUpdate = {
       full_name,
-      department: department || null,
       department_id: department_id || null,
       division_id: division_id || null,
-      designation: designation || null,
       designation_id: designation_id || null,
-      tenant_id: isPlatformMasterAdmin ? (tenant_id || targetRes.data?.tenant_id || null) : actorTenantId,
       experience_years: experience_years || null,
       skillset: skillsetArr,
       reporting_manager_id: reporting_manager_id || null,
-      role: role || null,
       is_active,
       updated_at: new Date().toISOString(),
     }
 
-    const legacyUpdate = {
+    const simpleUpdate = {
       full_name,
-      department: department || null,
-      designation: designation || null,
-      experience_years: experience_years || null,
-      skillset: skillsetArr,
-      reporting_manager_id: reporting_manager_id || null,
-      role: role || null,
-      is_active,
-      updated_at: new Date().toISOString(),
-    }
-    const legacyNoRoleUpdate = {
-      full_name,
-      department: department || null,
-      designation: designation || null,
-      experience_years: experience_years || null,
-      skillset: skillsetArr,
-      reporting_manager_id: reporting_manager_id || null,
       is_active,
       updated_at: new Date().toISOString(),
     }
@@ -439,17 +400,10 @@ export async function PUT(request: NextRequest) {
       .single()
 
     if (updateRes.error?.code === '42703' || updateRes.error?.code === 'PGRST204') {
+      console.log('[team API] Modern update failed, trying simple update')
       updateRes = await adminClient
         .from('users')
-        .update(legacyUpdate as any)
-        .eq('id', id)
-        .select('*')
-        .single()
-    }
-    if (updateRes.error?.code === '42703' || updateRes.error?.code === 'PGRST204') {
-      updateRes = await adminClient
-        .from('users')
-        .update(legacyNoRoleUpdate as any)
+        .update(simpleUpdate as any)
         .eq('id', id)
         .select('*')
         .single()
@@ -488,17 +442,17 @@ export async function DELETE(request: NextRequest) {
     const adminClient = getAdminClient()
     const actorRes = await adminClient
       .from('users')
-      .select('id, role, tenant_id')
+      .select('id, role_id, client_id, roles:role_id (name)')
       .eq('id', sessionUser.id)
       .single()
-    const actorRole = resolveRole(actorRes.data)
-    const actorTenantId = (actorRes.data as any)?.tenant_id || null
-    const isPlatformMasterAdmin = actorRole === 'master_admin' && !actorTenantId
-    const isTenantSuperAdmin = actorRole === 'super_admin' && !!actorTenantId
-    if (!isPlatformMasterAdmin && !isTenantSuperAdmin) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
-    const targetRes = await adminClient.from('users').select('id, tenant_id').eq('id', id).single()
+    const actorRole = (actorRes.data as any)?.roles?.name || resolveRole(actorRes.data)
+    const actorClientId = (actorRes.data as any)?.client_id || null
+    const isPlatformMasterAdmin = actorRole === 'master_admin'
+    const isClientAdmin = actorRole === 'client_admin'
+    if (!isPlatformMasterAdmin && !isClientAdmin) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    const targetRes = await adminClient.from('users').select('id, client_id').eq('id', id).single()
     if (targetRes.error) return NextResponse.json({ error: 'User not found' }, { status: 404 })
-    if (!isPlatformMasterAdmin && targetRes.data?.tenant_id !== actorTenantId) {
+    if (!isPlatformMasterAdmin && targetRes.data?.client_id !== actorClientId) {
       return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
     }
 
