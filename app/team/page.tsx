@@ -50,23 +50,18 @@ const experienceLevels = [
 
 const RESTRICTED_DESIGNATIONS = ['Super Admin', 'Delivery Manager']
 const ROLE_OPTIONS = [
-  { value: 'super_admin', label: 'Super Admin (Client Side)' },
-  { value: 'project_manager', label: 'Project Manager' },
-  { value: 'delivery_manager', label: 'Delivery Manager' },
+  { value: 'client_admin', label: 'Client Admin (Super Admin)' },
+  { value: 'manager', label: 'Manager' },
   { value: 'team_lead', label: 'Team Lead' },
-  { value: 'senior', label: 'Senior' },
-  { value: 'junior', label: 'Junior' },
-  { value: 'trainee', label: 'Trainee' },
+  { value: 'member', label: 'Member' },
 ] as const
 
 const roleLevel: Record<string, number> = {
-  trainee: 1,
-  junior: 2,
-  senior: 3,
-  team_lead: 4,
-  delivery_manager: 5,
-  project_manager: 6,
-  super_admin: 7,
+  member: 1,
+  team_lead: 2,
+  manager: 3,
+  client_admin: 4,
+  master_admin: 5,
 }
 
 const isNonAssignable = (designation: string | null): boolean => {
@@ -179,20 +174,15 @@ export default function TeamPage() {
           setTeamLeads(leads)
         }
 
-        const selfRoleModern = await supabase
+        // Fetch user's role via role_id join
+        const selfRoleRes = await supabase
           .from('users')
-          .select('role')
+          .select('role_id, roles:role_id (name)')
           .eq('id', user.id)
           .single()
-        if (!selfRoleModern.error && selfRoleModern.data) {
-          setCurrentUserRole(normalizeRole(selfRoleModern.data?.role || null))
-        } else {
-          const selfRoleLegacy = await supabase
-            .from('users')
-            .select('role')
-            .eq('id', user.id)
-            .single()
-          setCurrentUserRole(normalizeRole(selfRoleLegacy.data?.role || null))
+        if (!selfRoleRes.error && selfRoleRes.data) {
+          const roleName = (selfRoleRes.data as any)?.roles?.name || null
+          setCurrentUserRole(normalizeRole(roleName))
         }
       } catch (err) {
         console.error('[v0] Error during init:', err)
@@ -243,7 +233,7 @@ export default function TeamPage() {
   })
   const roleBasedManagerOptions = reportingManagerOptions.filter((lead) => {
     const managerRole = normalizeRole(lead.role)
-    return ['project_manager', 'delivery_manager', 'team_lead', 'senior', 'super_admin'].includes(managerRole)
+    return ['master_admin', 'client_admin', 'manager', 'team_lead'].includes(managerRole)
   })
 
   // Filter team members based on search and filters
@@ -506,7 +496,8 @@ export default function TeamPage() {
     setShowEditModal(true)
   }
 
-  const canManageTeam = currentUserRole === 'super_admin'
+  // Master Admin and Client Admin can manage team (Client Admin is Super Admin for their org)
+  const canManageTeam = currentUserRole === 'master_admin' || currentUserRole === 'client_admin'
 
   if (loading) {
     return (

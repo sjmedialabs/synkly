@@ -33,8 +33,8 @@ export default function ProjectsPage() {
         .eq('id', user.id)
         .single()
 
-      if (userData?.roles?.name) {
-        setUserRole(userData.roles.name)
+      if ((userData as any)?.roles?.name) {
+        setUserRole((userData as any).roles.name)
       }
 
       // RBAC-enforced project list from backend API
