@@ -23,7 +23,7 @@ export default function SettingsPage() {
       }
 
       const { data: userData } = await supabase
-        .from('users')
+        .from('team')
         .select('role')
         .eq('id', user.id)
         .single()

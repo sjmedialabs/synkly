@@ -8,6 +8,7 @@ import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Users, FolderKanban, CheckSquare, Clock, TrendingUp, AlertCircle } from 'lucide-react'
+import { projectHref } from '@/lib/slug'
 
 type TeamMember = {
   id: string
@@ -70,7 +71,7 @@ export default function MyTeamPage() {
 
       // Get current user's role and info
       const { data: userData } = await supabase
-        .from('users')
+        .from('team')
         .select('id, roles(name)')
         .eq('id', authUser.id)
         .single()
@@ -86,7 +87,7 @@ export default function MyTeamPage() {
 
       // Fetch team members reporting to this user
       const { data: membersData } = await supabase
-        .from('users')
+        .from('team')
         .select('id, full_name, email, designation, is_active')
         .eq('reporting_manager_id', authUser.id)
         .eq('is_active', true)
@@ -305,9 +306,9 @@ export default function MyTeamPage() {
               <div className="space-y-3">
                 {projects.slice(0, 5).map((project) => {
                   const totalHours = (project.modules || []).reduce((sum, m) => sum + (m.estimated_hours || 0), 0)
-                  
+                  const summaries = projects.map((p) => ({ id: p.id, name: p.name }))
                   return (
-                    <Link key={project.id} href={`/projects/${project.id}`}>
+                    <Link key={project.id} href={projectHref(project, summaries)}>
                       <div className="flex items-center justify-between p-3 bg-muted/50 rounded-lg hover:bg-muted transition">
                         <div>
                           <p className="font-medium text-foreground">{project.name}</p>

@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Create corresponding user profile record
-    await supabase.from('users').insert({
+    await supabase.from('team').insert({
       id: data.user.id,
       email: email.toLowerCase().trim(),
       role_id: roleData.id,

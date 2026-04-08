@@ -43,7 +43,7 @@ export async function POST() {
     const clientSuperEmail = 'client.admin@sjmedialabs.com'
     const clientSuperPassword = 'ClientSuper@123'
 
-    // Ensure tenant/client exists for client super admin
+    // Ensure tenant/client exists for client admin
     let tenantId: string | null = null
     const tenantRes = await adminClient
       .from('tenants')
@@ -75,12 +75,12 @@ export async function POST() {
       tenant_id: null,
     })
     const clientSuperId = await upsertAuthUser(adminClient, clientSuperEmail, clientSuperPassword, {
-      role: 'super_admin',
+      role: 'client_admin',
       tenant_id: tenantId,
     })
 
     const masterUpsert = await adminClient
-      .from('users')
+      .from('team')
       .upsert(
         {
           id: masterId,
@@ -94,18 +94,18 @@ export async function POST() {
       )
     if (masterUpsert.error) throw new Error(masterUpsert.error.message)
     await adminClient
-      .from('users')
+      .from('team')
       .update({ role: 'master_admin', tenant_id: null } as any)
       .eq('email', masterEmail)
 
     const clientUpsert = await adminClient
-      .from('users')
+      .from('team')
       .upsert(
         {
           id: clientSuperId,
           email: clientSuperEmail,
-          full_name: 'Client Super Admin',
-          role: 'super_admin',
+          full_name: 'Client Admin',
+          role: 'client_admin',
           tenant_id: tenantId,
           is_active: true,
         } as any,
@@ -113,8 +113,8 @@ export async function POST() {
       )
     if (clientUpsert.error) throw new Error(clientUpsert.error.message)
     await adminClient
-      .from('users')
-      .update({ role: 'super_admin', tenant_id: tenantId } as any)
+      .from('team')
+      .update({ role: 'client_admin', tenant_id: tenantId } as any)
       .eq('email', clientSuperEmail)
 
     return NextResponse.json({

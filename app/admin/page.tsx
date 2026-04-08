@@ -65,15 +65,12 @@ export default function AdminDashboardPage() {
 
       // Verify user is master admin
       const { data: userData } = await supabase
-        .from('users')
-        .select(`
-          full_name,
-          roles (name)
-        `)
+        .from('team')
+        .select('full_name, role')
         .eq('id', user.id)
         .single()
 
-      const roleName = (userData?.roles as any)?.name
+      const roleName = userData?.role
       if (roleName !== 'master_admin') {
         router.push('/dashboard')
         return
@@ -84,7 +81,7 @@ export default function AdminDashboardPage() {
       // Fetch platform stats
       const [clientsRes, usersRes, projectsRes, tasksRes] = await Promise.all([
         supabase.from('clients').select('id, is_active'),
-        supabase.from('users').select('id').eq('status', 'active'),
+        supabase.from('team').select('id').eq('status', 'active'),
         supabase.from('projects').select('id'),
         supabase.from('tasks').select('id, status'),
       ])
@@ -113,7 +110,7 @@ export default function AdminDashboardPage() {
         const clientsWithCounts = await Promise.all(
           recentClientsData.map(async (client) => {
             const [usersCount, projectsCount] = await Promise.all([
-              supabase.from('users').select('id', { count: 'exact', head: true }).eq('client_id', client.id),
+              supabase.from('team').select('id', { count: 'exact', head: true }).eq('client_id', client.id),
               supabase.from('projects').select('id', { count: 'exact', head: true }).eq('client_id', client.id),
             ])
             return {
@@ -176,7 +173,7 @@ export default function AdminDashboardPage() {
               Welcome, {userName}
             </h3>
             <p className="text-muted-foreground">
-              Master Admin - Platform Overview
+              Master Admin - Platform Controls
             </p>
           </div>
         </div>
@@ -323,22 +320,10 @@ export default function AdminDashboardPage() {
                   Add New Client
                 </Button>
               </Link>
-              <Link href="/admin/users" className="block">
-                <Button variant="outline" className="w-full justify-start">
-                  <Users className="w-4 h-4 mr-2" />
-                  Manage Users
-                </Button>
-              </Link>
-              <Link href="/projects" className="block">
-                <Button variant="outline" className="w-full justify-start">
-                  <FolderKanban className="w-4 h-4 mr-2" />
-                  View All Projects
-                </Button>
-              </Link>
               <Link href="/settings/master-data" className="block">
                 <Button variant="outline" className="w-full justify-start">
                   <Activity className="w-4 h-4 mr-2" />
-                  Master Data Settings
+                  Manage Master Data
                 </Button>
               </Link>
             </div>

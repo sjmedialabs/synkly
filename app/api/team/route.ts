@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
 import { resolveRole } from '@/lib/rbac'
 import { createClient as createServerClient } from '@/lib/supabase/server'
+import { getAuthContext } from '@/lib/rbac-server'
 
 // Create admin client with service role key for user management
 function getAdminClient() {
@@ -12,7 +13,152 @@ function getAdminClient() {
   })
 }
 
-// GET - Sync auth users to users table and return all team members
+async function resolvePeopleTable(
+  adminClient: ReturnType<typeof getAdminClient>,
+): Promise<'team' | 'users' | null> {
+  const teamCheck = await adminClient.from('team').select('id').limit(1)
+  if (!teamCheck.error) return 'team'
+  const usersCheck = await adminClient.from('users').select('id').limit(1)
+  if (!usersCheck.error) return 'users'
+  return null
+}
+
+function isPeopleTableMissingError(err: { code?: string; message?: string } | null) {
+  if (!err) return false
+  if (err.code === 'PGRST205') return true
+  const m = String(err.message || '')
+  return m.includes('schema cache') || m.includes('Could not find the table')
+}
+
+/** When `public.team` / `public.users` is absent or PostgREST cannot use it, persist profile on auth metadata. */
+async function putTeamMemberViaAuthMetadata(
+  adminClient: ReturnType<typeof getAdminClient>,
+  sessionUser: { id: string },
+  targetId: string,
+  body: {
+    full_name?: string
+    department?: string | null
+    department_id?: string | null
+    division_id?: string | null
+    designation?: string | null
+    designation_id?: string | null
+    tenant_id?: string | null
+    experience_years?: number | null
+    skillset?: unknown
+    reporting_manager_id?: string | null
+    role?: string
+    is_active?: boolean
+  },
+  skillsetArr: string[] | null,
+) {
+  const ctx = await getAuthContext()
+  if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const isPlatformMasterAdmin = ctx.isMasterAdmin
+  const isClientAdmin = ctx.isClientAdmin
+  const isManager = ctx.role === 'manager'
+  const isTeamLead = ctx.role === 'team_lead'
+  const canEdit = isPlatformMasterAdmin || isClientAdmin || isManager || isTeamLead
+  if (!canEdit) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+
+  const targetAuth = await adminClient.auth.admin.getUserById(targetId)
+  if (targetAuth.error || !targetAuth.data?.user) {
+    return NextResponse.json({ error: 'User not found' }, { status: 404 })
+  }
+
+  const targetUser = targetAuth.data.user
+  const targetMeta = (targetUser.user_metadata || {}) as Record<string, unknown>
+  const actorClientId = ctx.clientId
+  const targetClientId = typeof targetMeta.client_id === 'string' ? targetMeta.client_id : null
+
+  if (!isPlatformMasterAdmin) {
+    const effectiveTargetClient = targetClientId || (isClientAdmin ? actorClientId : null)
+    if (actorClientId && effectiveTargetClient && actorClientId !== effectiveTargetClient) {
+      return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    }
+  }
+
+  if (isTeamLead && !isPlatformMasterAdmin && !isClientAdmin && !isManager) {
+    const reportsTo = targetMeta.reporting_manager_id
+    if (reportsTo !== sessionUser.id && targetId !== sessionUser.id) {
+      return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    }
+  }
+
+  const {
+    full_name,
+    department,
+    department_id,
+    division_id,
+    designation,
+    designation_id,
+    tenant_id,
+    experience_years,
+    reporting_manager_id,
+    role,
+    is_active,
+  } = body
+
+  const currentMeta = targetMeta as Record<string, any>
+  const bodyKeys = Object.keys(body as object)
+  const pick = <T,>(key: string, fallback: T, sent: unknown): T =>
+    bodyKeys.includes(key) ? (sent as T) : fallback
+
+  const nextMeta: Record<string, any> = {
+    ...currentMeta,
+    full_name: pick('full_name', currentMeta.full_name, full_name),
+    department: pick('department', currentMeta.department, department),
+    department_id: pick('department_id', currentMeta.department_id, department_id),
+    division_id: pick('division_id', currentMeta.division_id, division_id),
+    designation: pick('designation', currentMeta.designation, designation),
+    designation_id: pick('designation_id', currentMeta.designation_id, designation_id),
+    reporting_manager_id: pick(
+      'reporting_manager_id',
+      currentMeta.reporting_manager_id,
+      reporting_manager_id,
+    ),
+    experience_years: pick('experience_years', currentMeta.experience_years, experience_years),
+    skills: pick('skillset', currentMeta.skills, skillsetArr),
+    is_active: pick('is_active', currentMeta.is_active, is_active),
+  }
+  if (tenant_id !== undefined && tenant_id !== null) nextMeta.tenant_id = tenant_id
+  if (role && (isPlatformMasterAdmin || isClientAdmin)) {
+    nextMeta.role = role
+  }
+  if (!targetClientId && actorClientId && isClientAdmin) {
+    nextMeta.client_id = actorClientId
+  }
+
+  const authUpdate = await adminClient.auth.admin.updateUserById(targetId, { user_metadata: nextMeta })
+  if (authUpdate.error) {
+    return NextResponse.json({ error: authUpdate.error.message }, { status: 500 })
+  }
+
+  const resolvedClientId =
+    typeof nextMeta.client_id === 'string' ? nextMeta.client_id : targetClientId
+
+  return NextResponse.json({
+    user: {
+      id: targetId,
+      email: targetUser.email || '',
+      full_name: nextMeta.full_name ?? null,
+      department_name: typeof nextMeta.department === 'string' ? nextMeta.department : null,
+      designation_name: typeof nextMeta.designation === 'string' ? nextMeta.designation : null,
+      department_id: nextMeta.department_id ?? null,
+      division_id: nextMeta.division_id ?? null,
+      designation_id: nextMeta.designation_id ?? null,
+      reporting_manager_id: nextMeta.reporting_manager_id ?? null,
+      experience_years: nextMeta.experience_years ?? null,
+      skillset: Array.isArray(nextMeta.skills) ? nextMeta.skills : [],
+      is_active: nextMeta.is_active !== false,
+      client_id: resolvedClientId,
+    },
+    updated: true,
+    warning: 'Updated auth user metadata only (no public.team / public.users table).',
+  })
+}
+
+// GET - Sync auth users to team table and return all team members
 export async function GET() {
   try {
     const serverClient = await createServerClient()
@@ -22,8 +168,44 @@ export async function GET() {
     if (!sessionUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
     const adminClient = getAdminClient()
+    const peopleTable = await resolvePeopleTable(adminClient)
+    if (!peopleTable) {
+      // Get all auth users
+      const { data: authUsers, error: authError } = await adminClient.auth.admin.listUsers()
+      if (authError) {
+        console.error('[team API] Failed to list auth users:', authError)
+        return NextResponse.json({ error: authError.message }, { status: 500 })
+      }
+      console.error('[team API] No people table available (expected public.team or public.users)')
+      const authBackedUsers = (authUsers?.users || []).map((u: any) => ({
+        id: u.id,
+        email: u.email || '',
+        full_name: u.user_metadata?.full_name || u.email?.split('@')[0] || 'Unknown',
+        name: u.user_metadata?.full_name || u.email?.split('@')[0] || 'Unknown',
+        role: resolveRole({ role: u.user_metadata?.role, designation: u.user_metadata?.designation }) || null,
+        department_name: u.user_metadata?.department || null,
+        division_name: u.user_metadata?.division || null,
+        designation_name: u.user_metadata?.designation || null,
+        reporting_manager_id: u.user_metadata?.reporting_manager_id || null,
+        experience_years: Number(u.user_metadata?.experience_years || 0) || null,
+        skillset: Array.isArray(u.user_metadata?.skills) ? u.user_metadata.skills : [],
+        reporting_manager_name: null,
+        client_id: null,
+        tenant_id: null,
+        is_active: u.user_metadata?.is_active !== false,
+        created_at: u.created_at || new Date().toISOString(),
+      }))
+      console.log('TEAM DATA:', authBackedUsers)
+      return NextResponse.json({
+        data: authBackedUsers,
+        users: authBackedUsers,
+        synced: 0,
+        warning: 'Using auth.users fallback because no people table was found',
+      })
+    }
+
     const actorRes = await adminClient
-      .from('users')
+      .from(peopleTable)
       .select('id, role_id, client_id, roles:role_id (name)')
       .eq('id', sessionUser.id)
       .single()
@@ -41,14 +223,14 @@ export async function GET() {
       return NextResponse.json({ error: authError.message }, { status: 500 })
     }
     
-    // Get existing users from public.users
+    // Get existing users from public.team
     const { data: existingUsers } = await adminClient
-      .from('users')
+      .from(peopleTable)
       .select('id')
     
     const existingIds = new Set(existingUsers?.map(u => u.id) || [])
     
-    // Find auth users not in public.users
+    // Find auth users not in public.team
     const missingUsers = authUsers?.users?.filter(u => !existingIds.has(u.id)) || []
     
     // Insert missing users
@@ -61,7 +243,7 @@ export async function GET() {
       }))
       
       const { error: insertError } = await adminClient
-        .from('users')
+        .from(peopleTable)
         .insert(toInsert)
         .select()
       
@@ -74,7 +256,7 @@ export async function GET() {
     let allUsers: any[] | null = null
     let fetchError: any = null
     const modernQuery = await adminClient
-      .from('users')
+      .from(peopleTable)
       .select(`
         id,
         email,
@@ -104,7 +286,7 @@ export async function GET() {
     if (fetchError) {
       console.error('[team API] Modern query failed, trying simplified:', fetchError)
       const simpleQuery = await adminClient
-        .from('users')
+        .from(peopleTable)
         .select(`
           id,
           email,
@@ -118,6 +300,12 @@ export async function GET() {
         .order('created_at', { ascending: false })
       allUsers = simpleQuery.data as any[] | null
       fetchError = simpleQuery.error
+    }
+    if (fetchError) {
+      console.error('[team API] Simplified query failed, trying wildcard:', fetchError)
+      const wildcardQuery = await adminClient.from(peopleTable).select('*').order('created_at', { ascending: false })
+      allUsers = wildcardQuery.data as any[] | null
+      fetchError = wildcardQuery.error
     }
     
     if (fetchError) {
@@ -147,14 +335,15 @@ export async function GET() {
     const adaptedUsers = visibleUsers.map((user: any) => ({
       ...user,
       role: user.roles?.name || resolveRole(user),
-      name: user.full_name || null,
+      name: user.full_name || user.name || null,
       department_name: user.department?.name || null,
       division_name: user.division?.name || null,
       designation_name: user.designation?.name || null,
-      reporting_manager_name: user.reporting_manager?.full_name || null,
+      reporting_manager_name: user.reporting_manager?.full_name || user.reporting_manager?.name || null,
     }))
+    console.log('TEAM DATA:', adaptedUsers)
     console.log('[team API] Successfully fetched users:', adaptedUsers.length || 0)
-    return NextResponse.json({ users: adaptedUsers, synced: missingUsers.length })
+    return NextResponse.json({ data: adaptedUsers, users: adaptedUsers, synced: missingUsers.length })
   } catch (err) {
     console.error('[team API] GET error:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
@@ -191,8 +380,18 @@ export async function POST(request: NextRequest) {
     }
 
     const adminClient = getAdminClient()
+    const peopleTable = await resolvePeopleTable(adminClient)
+    if (!peopleTable) {
+      return NextResponse.json(
+        {
+          error:
+            'People table is not available. Create members with POST /api/team-members, or add public.team (or public.users).',
+        },
+        { status: 503 },
+      )
+    }
     const actorRes = await adminClient
-      .from('users')
+      .from(peopleTable)
       .select('id, role_id, client_id, roles:role_id (name)')
       .eq('id', sessionUser.id)
       .single()
@@ -289,10 +488,17 @@ export async function POST(request: NextRequest) {
       client_id: effectiveClientId,
       is_active,
     }
+    const namePayload = {
+      id: userId,
+      email,
+      name: full_name,
+      client_id: effectiveClientId,
+      is_active,
+    }
 
-    // Upsert into users table (modern first, fallback for older schema)
+    // Upsert into team table (modern first, fallback for older schema)
     let upsertRes = await adminClient
-      .from('users')
+      .from(peopleTable)
       .upsert(modernPayload as any, { onConflict: 'id' })
       .select('*')
       .single()
@@ -300,8 +506,16 @@ export async function POST(request: NextRequest) {
     if (upsertRes.error?.code === '42703' || upsertRes.error?.code === 'PGRST204') {
       console.log('[team API] Modern upsert failed, trying simple payload')
       upsertRes = await adminClient
-        .from('users')
+        .from(peopleTable)
         .upsert(simplePayload as any, { onConflict: 'id' })
+        .select('*')
+        .single()
+    }
+    if (upsertRes.error?.code === '42703' || upsertRes.error?.code === 'PGRST204') {
+      console.log('[team API] Simple upsert failed, trying name payload')
+      upsertRes = await adminClient
+        .from(peopleTable)
+        .upsert(namePayload as any, { onConflict: 'id' })
         .select('*')
         .single()
     }
@@ -354,8 +568,35 @@ export async function PUT(request: NextRequest) {
     }
 
     const adminClient = getAdminClient()
+    const skillsetArr = skillset
+      ? (Array.isArray(skillset) ? skillset : skillset.split(',').map((s: string) => s.trim()).filter(Boolean))
+      : null
+
+    const peopleTable = await resolvePeopleTable(adminClient)
+    if (!peopleTable) {
+      return putTeamMemberViaAuthMetadata(
+        adminClient,
+        sessionUser,
+        id,
+        {
+          full_name,
+          department,
+          department_id,
+          division_id,
+          designation,
+          designation_id,
+          tenant_id,
+          experience_years,
+          skillset,
+          reporting_manager_id,
+          role,
+          is_active,
+        },
+        skillsetArr,
+      )
+    }
     const actorRes = await adminClient
-      .from('users')
+      .from(peopleTable)
       .select('id, role_id, client_id, roles:role_id (name)')
       .eq('id', sessionUser.id)
       .single()
@@ -368,7 +609,7 @@ export async function PUT(request: NextRequest) {
     const canEdit = isPlatformMasterAdmin || isClientAdmin || isManager || isTeamLead
     if (!canEdit) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
     const targetRes = await adminClient
-      .from('users')
+      .from(peopleTable)
       .select('id, client_id, reporting_manager_id')
       .eq('id', id)
       .single()
@@ -381,10 +622,6 @@ export async function PUT(request: NextRequest) {
         return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
       }
     }
-
-    const skillsetArr = skillset
-      ? (Array.isArray(skillset) ? skillset : skillset.split(',').map((s: string) => s.trim()).filter(Boolean))
-      : null
 
     // Get role_id if role is provided (only admins can change roles)
     let roleId = undefined
@@ -419,9 +656,14 @@ export async function PUT(request: NextRequest) {
       is_active,
       updated_at: new Date().toISOString(),
     }
+    const nameUpdate = {
+      name: full_name,
+      is_active,
+      updated_at: new Date().toISOString(),
+    }
 
     let updateRes = await adminClient
-      .from('users')
+      .from(peopleTable)
       .update(modernUpdate as any)
       .eq('id', id)
       .select('*')
@@ -430,8 +672,17 @@ export async function PUT(request: NextRequest) {
     if (updateRes.error?.code === '42703' || updateRes.error?.code === 'PGRST204') {
       console.log('[team API] Modern update failed, trying simple update')
       updateRes = await adminClient
-        .from('users')
+        .from(peopleTable)
         .update(simpleUpdate as any)
+        .eq('id', id)
+        .select('*')
+        .single()
+    }
+    if (updateRes.error?.code === '42703' || updateRes.error?.code === 'PGRST204') {
+      console.log('[team API] Simple update failed, trying name update')
+      updateRes = await adminClient
+        .from(peopleTable)
+        .update(nameUpdate as any)
         .eq('id', id)
         .select('*')
         .single()
@@ -441,6 +692,29 @@ export async function PUT(request: NextRequest) {
     const error = updateRes.error
 
     if (error) {
+      if (isPeopleTableMissingError(error)) {
+        console.warn('[team API] PUT: DB update failed (missing table), using auth metadata fallback')
+        return putTeamMemberViaAuthMetadata(
+          adminClient,
+          sessionUser,
+          id,
+          {
+            full_name,
+            department,
+            department_id,
+            division_id,
+            designation,
+            designation_id,
+            tenant_id,
+            experience_years,
+            skillset,
+            reporting_manager_id,
+            role,
+            is_active,
+          },
+          skillsetArr,
+        )
+      }
       console.error('[team API] PUT error:', error)
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
@@ -454,48 +728,44 @@ export async function PUT(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const serverClient = await createServerClient()
-    const {
-      data: { user: sessionUser },
-    } = await serverClient.auth.getUser()
-    if (!sessionUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!ctx.isMasterAdmin && !ctx.isClientAdmin) {
+      return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    }
 
     const { searchParams } = new URL(request.url)
     const id = searchParams.get('id')
-
     if (!id) {
       return NextResponse.json({ error: 'User ID is required' }, { status: 400 })
     }
 
-    const adminClient = getAdminClient()
-    const actorRes = await adminClient
-      .from('users')
-      .select('id, role_id, client_id, roles:role_id (name)')
-      .eq('id', sessionUser.id)
-      .single()
-    const actorRole = (actorRes.data as any)?.roles?.name || resolveRole(actorRes.data)
-    const actorClientId = (actorRes.data as any)?.client_id || null
-    const isPlatformMasterAdmin = actorRole === 'master_admin'
-    const isClientAdmin = actorRole === 'client_admin'
-    if (!isPlatformMasterAdmin && !isClientAdmin) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
-    const targetRes = await adminClient.from('users').select('id, client_id').eq('id', id).single()
-    if (targetRes.error) return NextResponse.json({ error: 'User not found' }, { status: 404 })
-    if (!isPlatformMasterAdmin && targetRes.data?.client_id !== actorClientId) {
+    const peopleTable = await resolvePeopleTable(ctx.adminClient as ReturnType<typeof getAdminClient>)
+
+    const { data: targetAuth, error: targetAuthErr } = await ctx.adminClient.auth.admin.getUserById(id)
+    if (targetAuthErr || !targetAuth?.user) {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 })
+    }
+    const tMeta = (targetAuth.user.user_metadata || {}) as Record<string, unknown>
+    const tClient = typeof tMeta.client_id === 'string' ? tMeta.client_id : null
+    if (!ctx.isMasterAdmin && tClient && ctx.clientId && tClient !== ctx.clientId) {
       return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
     }
 
-    // Delete from auth.users first (will cascade to users table if FK set up)
-    const { error: authDeleteError } = await adminClient.auth.admin.deleteUser(id)
-
+    const { error: authDeleteError } = await ctx.adminClient.auth.admin.deleteUser(id)
     if (authDeleteError) {
       console.error('[team API] Auth delete error:', authDeleteError)
-      // If auth delete fails, still try to delete from users table
+      return NextResponse.json({ error: authDeleteError.message }, { status: 500 })
     }
 
-    // Also delete from users table directly to ensure cleanup
-    await adminClient.from('users').delete().eq('id', id)
+    if (peopleTable) {
+      await ctx.adminClient.from(peopleTable).delete().eq('id', id)
+    }
 
-    return NextResponse.json({ deleted: true })
+    return NextResponse.json({
+      deleted: true,
+      ...(peopleTable ? {} : { warning: 'Auth user removed; no public.team / public.users row to delete.' }),
+    })
   } catch (err) {
     console.error('[team API] DELETE error:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })

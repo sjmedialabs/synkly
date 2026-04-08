@@ -55,7 +55,7 @@ export default function ReportsPage() {
       ] = await Promise.all([
         supabase.from('projects').select('status'),
         supabase.from('tasks').select('status'),
-        supabase.from('users').select('id'),
+        supabase.from('team').select('id'),
         supabase.from('milestones').select('status'),
         supabase.from('sprint_tracking').select('status'),
       ])

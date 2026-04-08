@@ -15,32 +15,18 @@ import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useState, Suspense } from 'react'
 import { Shield, Building2, Briefcase, Users, User, LogIn, Loader2 } from 'lucide-react'
-import { ROLE_LABELS, resolveRole, type RoleKey } from '@/lib/rbac'
+import { ROLE_LABELS, normalizeRole, type RoleKey } from '@/lib/rbac'
 
-const roleConfig: Record<RoleKey, {
-  icon: React.ElementType
-  bgColor: string
-}> = {
-  'master_admin': {
-    icon: Shield,
-    bgColor: 'bg-rose-600',
-  },
-  'client_admin': {
-    icon: Building2,
-    bgColor: 'bg-blue-600',
-  },
-  'manager': {
-    icon: Briefcase,
-    bgColor: 'bg-emerald-600',
-  },
-  'team_lead': {
-    icon: Users,
-    bgColor: 'bg-amber-600',
-  },
-  'member': {
-    icon: User,
-    bgColor: 'bg-violet-600',
-  },
+/** Icon + accent for the post-login “Logging in as …” banner only */
+const loginRoleBannerConfig: Record<
+  RoleKey,
+  { icon: React.ElementType; bgColor: string }
+> = {
+  master_admin: { icon: Shield, bgColor: 'bg-rose-600' },
+  client_admin: { icon: Building2, bgColor: 'bg-blue-600' },
+  manager: { icon: Briefcase, bgColor: 'bg-emerald-600' },
+  team_lead: { icon: Users, bgColor: 'bg-amber-600' },
+  member: { icon: User, bgColor: 'bg-violet-600' },
 }
 
 function LoginForm() {
@@ -69,31 +55,25 @@ function LoginForm() {
 
       if (authError) throw authError
 
-      // Fetch user's role and determine redirect
+      // Role + status from server (avoids browser REST to missing `team` / `roles` tables)
       if (authData.user) {
-        const { data: userData } = await supabase
-          .from('users')
-          .select(`
-            *,
-            roles (name, permissions)
-          `)
-          .eq('id', authData.user.id)
-          .single()
+        const metaRole = normalizeRole((authData.user.user_metadata as any)?.role)
+        const meRes = await fetch('/api/me')
+        const me = meRes.ok ? await meRes.json() : null
 
-        // Check if user account is active
-        if (userData?.status === 'suspended') {
+        // Prefer server profile when cookies are synced; otherwise metadata still allows redirect
+        if (me?.status === 'suspended') {
           await supabase.auth.signOut()
           throw new Error('Your account has been suspended. Please contact support.')
         }
 
-        if (userData?.status === 'inactive') {
+        if (me?.status === 'inactive') {
           await supabase.auth.signOut()
           throw new Error('Your account is inactive. Please contact your administrator.')
         }
 
-        const roleName = (userData?.roles as any)?.name as RoleKey | undefined
-        const resolvedRole = roleName || resolveRole(userData)
-        
+        const resolvedRole = (me?.role as RoleKey | null) || metaRole
+
         if (resolvedRole) {
           setUserRole(resolvedRole)
           
@@ -129,7 +109,7 @@ function LoginForm() {
     }
   }
 
-  const config = userRole ? roleConfig[userRole] : null
+  const config = userRole ? loginRoleBannerConfig[userRole] : null
   const Icon = config?.icon
 
   return (
@@ -214,15 +194,6 @@ function LoginForm() {
               )}
             </Button>
           </div>
-          <div className="mt-4 text-center text-sm">
-            {"Don't have an account? "}
-            <Link
-              href="/auth/sign-up"
-              className="text-primary hover:underline font-medium"
-            >
-              Sign up
-            </Link>
-          </div>
         </form>
       </CardContent>
     </Card>
@@ -253,28 +224,6 @@ export default function LoginPage() {
           }>
             <LoginForm />
           </Suspense>
-
-          {/* Role Info */}
-          <Card className="border-border bg-secondary/30">
-            <CardContent className="pt-4">
-              <p className="text-xs text-muted-foreground text-center mb-3">
-                Available roles in Synkly:
-              </p>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                {Object.entries(roleConfig).map(([key, value]) => {
-                  const RoleIcon = value.icon
-                  return (
-                    <div key={key} className="flex items-center gap-1.5 text-muted-foreground">
-                      <div className={`${value.bgColor} p-1 rounded text-white`}>
-                        <RoleIcon className="w-3 h-3" />
-                      </div>
-                      <span>{ROLE_LABELS[key as RoleKey]}</span>
-                    </div>
-                  )
-                })}
-              </div>
-            </CardContent>
-          </Card>
         </div>
       </div>
     </div>

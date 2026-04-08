@@ -22,20 +22,20 @@ export async function POST(request: NextRequest) {
     if (!sessionUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
     const roleRes = await adminClient
-      .from('users')
+      .from('team')
       .select('role')
       .eq('id', sessionUser.id)
       .single()
     let currentRole = normalizeRole(roleRes.data?.role)
     if (roleRes.error) {
       const legacyRole = await adminClient
-        .from('users')
+        .from('team')
         .select('role')
         .eq('id', sessionUser.id)
         .single()
       currentRole = normalizeRole((legacyRole.data as any)?.role)
     }
-    if (currentRole !== 'super_admin') {
+    if (currentRole !== 'master_admin' && currentRole !== 'client_admin') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 })
     }
 
@@ -57,7 +57,7 @@ export async function POST(request: NextRequest) {
 
     // Best effort DB flags for compatibility; schema-safe fallbacks
     const modernUpdate = await adminClient
-      .from('users')
+      .from('team')
       .update({
         status: 'active',
         password_reset_required: force_reset,
@@ -65,7 +65,7 @@ export async function POST(request: NextRequest) {
       } as any)
       .eq('id', user_id)
     if (modernUpdate.error) {
-      await adminClient.from('users').update({ updated_at: new Date().toISOString() }).eq('id', user_id)
+      await adminClient.from('team').update({ updated_at: new Date().toISOString() }).eq('id', user_id)
     }
 
     return NextResponse.json({ success: true, force_reset })

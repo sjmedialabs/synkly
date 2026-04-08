@@ -6,17 +6,20 @@ import { useEffect, useState } from 'react'
 import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import { UserPlus, X, Pencil, Eye, Trash2, Search } from 'lucide-react'
-import { normalizeRole } from '@/lib/rbac'
+import { normalizeRole, resolveRole, type RoleKey } from '@/lib/rbac'
 
 type TeamMember = {
   id: string
   email: string
   full_name: string | null
-  department: string | null
+  /** Plain text or Supabase join object `{ id, name }` */
+  department?: string | null | { id: string; name: string }
   department_id?: string | null
+  department_name?: string | null
   division_id?: string | null
-  designation: string | null
+  designation?: string | null | { id: string; name: string }
   designation_id?: string | null
+  designation_name?: string | null
   tenant_id?: string | null
   is_active: boolean
   created_at: string
@@ -48,9 +51,9 @@ const experienceLevels = [
   '8+ years',
 ]
 
-const RESTRICTED_DESIGNATIONS = ['Super Admin', 'Delivery Manager']
+const RESTRICTED_DESIGNATIONS = ['Client Admin', 'Super Admin', 'Delivery Manager']
 const ROLE_OPTIONS = [
-  { value: 'client_admin', label: 'Client Admin (Super Admin)' },
+  { value: 'client_admin', label: 'Client Admin' },
   { value: 'manager', label: 'Manager' },
   { value: 'team_lead', label: 'Team Lead' },
   { value: 'member', label: 'Member' },
@@ -64,9 +67,38 @@ const roleLevel: Record<string, number> = {
   master_admin: 5,
 }
 
+/** Role level for hierarchy (uses designation when RBAC role string is missing). */
+function leadRoleLevel(m: TeamMember): number {
+  const key = resolveRole({
+    role: typeof m.role === 'string' ? m.role : null,
+    designation: memberDesignationLabel(m),
+  })
+  if (key && roleLevel[key] != null) return roleLevel[key]
+  return 0
+}
+
 const isNonAssignable = (designation: string | null): boolean => {
   return designation ? RESTRICTED_DESIGNATIONS.includes(designation) : false
 }
+
+/** Master-data value: string, join `{ id, name }`, or empty */
+const displayLabel = (value: unknown): string => {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'object' && value !== null && 'name' in value) {
+    const n = (value as { name?: unknown }).name
+    if (typeof n === 'string') return n
+  }
+  return ''
+}
+
+const toSafeLower = (value: unknown): string => displayLabel(value).toLowerCase()
+
+const memberDepartmentLabel = (m: TeamMember) =>
+  displayLabel(m.department) || m.department_name || ''
+
+const memberDesignationLabel = (m: TeamMember) =>
+  displayLabel(m.designation) || m.designation_name || ''
 
 export default function TeamPage() {
   const supabase = createClient()
@@ -147,11 +179,13 @@ export default function TeamPage() {
             const safeDepts = (deptJson.values || []).filter((d: any) => d?.id && d?.name)
             setDepartments(safeDepts as MasterDataValue[])
           } else {
-            const uniqueDepts = Array.from(new Set(
-              (usersData as TeamMember[])
-                ?.map(m => m.department)
-                .filter((d): d is string => d != null)
-            )).map((name, idx) => ({ id: `dept-${idx}`, name }))
+            const uniqueDepts = Array.from(
+              new Set(
+                (usersData as TeamMember[])
+                  ?.map((m) => memberDepartmentLabel(m))
+                  .filter((d): d is string => Boolean(d)),
+              ),
+            ).map((name, idx) => ({ id: `dept-${idx}`, name }))
             setDepartments(uniqueDepts)
           }
 
@@ -160,11 +194,13 @@ export default function TeamPage() {
             const safeDesigs = (desigJson.values || []).filter((d: any) => d?.id && d?.name)
             setDesignations(safeDesigs as MasterDataValue[])
           } else {
-            const uniqueDesigs = Array.from(new Set(
-              (usersData as TeamMember[])
-                ?.map(m => m.designation)
-                .filter((d): d is string => d != null)
-            )).map((name, idx) => ({ id: `desig-${idx}`, name }))
+            const uniqueDesigs = Array.from(
+              new Set(
+                (usersData as TeamMember[])
+                  ?.map((m) => memberDesignationLabel(m))
+                  .filter((d): d is string => Boolean(d)),
+              ),
+            ).map((name, idx) => ({ id: `desig-${idx}`, name }))
             setDesignations(uniqueDesigs)
           }
 
@@ -174,15 +210,22 @@ export default function TeamPage() {
           setTeamLeads(leads)
         }
 
-        // Fetch user's role via role_id join
-        const selfRoleRes = await supabase
-          .from('users')
-          .select('role_id, roles:role_id (name)')
-          .eq('id', user.id)
-          .single()
-        if (!selfRoleRes.error && selfRoleRes.data) {
-          const roleName = (selfRoleRes.data as any)?.roles?.name || null
-          setCurrentUserRole(normalizeRole(roleName))
+        // Resolve role from server-backed auth context (robust across schema variants).
+        const meRes = await fetch('/api/me')
+        if (meRes.ok) {
+          const meJson = await meRes.json()
+          setCurrentUserRole(normalizeRole(meJson?.role))
+        } else {
+          // Fallback to previous client-side lookup if /api/me is unavailable.
+          const selfRoleRes = await supabase
+            .from('team')
+            .select('role, role_id, roles:role_id (name), designation')
+            .eq('id', user.id)
+            .maybeSingle()
+          if (!selfRoleRes.error && selfRoleRes.data) {
+            const roleName = (selfRoleRes.data as any)?.roles?.name || (selfRoleRes.data as any)?.role || null
+            setCurrentUserRole(normalizeRole(roleName) || normalizeRole((selfRoleRes.data as any)?.designation))
+          }
         }
       } catch (err) {
         console.error('[v0] Error during init:', err)
@@ -217,24 +260,26 @@ export default function TeamPage() {
     loadDivisions()
   }, [formData.department_id])
 
-  const reportingManagerOptions = teamLeads.filter((lead) => {
-    if (!lead.is_active) return false
-    const selectedRoleLevel = roleLevel[formData.role] || 0
-    const managerLevel = roleLevel[normalizeRole(lead.role)] || 0
-    if (selectedRoleLevel && managerLevel <= selectedRoleLevel) return false
-    const selectedDepartmentName =
-      departments.find((d: MasterDataValue) => d.id === formData.department_id)?.name || ''
-    const sameDepartment =
-      lead.department_id === formData.department_id ||
-      (!!selectedDepartmentName && (lead.department || '') === selectedDepartmentName)
-    const sameDivision = !formData.division_id || lead.division_id === formData.division_id
-    if (!formData.department_id) return true
-    return sameDepartment && sameDivision
-  })
-  const roleBasedManagerOptions = reportingManagerOptions.filter((lead) => {
-    const managerRole = normalizeRole(lead.role)
-    return ['master_admin', 'client_admin', 'manager', 'team_lead'].includes(managerRole)
-  })
+  // Subject = person receiving a reporting line. Default to "member" level until role is chosen (create flow).
+  const subjectRoleKey: RoleKey | null = formData.role
+    ? (normalizeRole(formData.role) as RoleKey | null)
+    : 'member'
+  const subjectRoleLevel =
+    subjectRoleKey && roleLevel[subjectRoleKey] != null ? roleLevel[subjectRoleKey] : roleLevel.member
+
+  // Anyone strictly higher in the role hierarchy can be a reporting manager (any department).
+  const reportingManagerOptions = teamLeads
+    .filter((lead) => {
+      if (!lead.is_active) return false
+      const mgrLevel = leadRoleLevel(lead)
+      if (mgrLevel <= subjectRoleLevel) return false
+      return true
+    })
+    .sort(
+      (a, b) =>
+        leadRoleLevel(b) - leadRoleLevel(a) ||
+        (a.full_name || a.email).localeCompare(b.full_name || b.email, undefined, { sensitivity: 'base' }),
+    )
 
   // Filter team members based on search and filters
   useEffect(() => {
@@ -243,14 +288,14 @@ export default function TeamPage() {
     if (searchQuery) {
       const query = searchQuery.toLowerCase()
       filtered = filtered.filter(m => 
-        m.full_name?.toLowerCase().includes(query) ||
-        m.email.toLowerCase().includes(query) ||
-        m.designation?.toLowerCase().includes(query)
+        toSafeLower(m.full_name).includes(query) ||
+        toSafeLower(m.email).includes(query) ||
+        toSafeLower(memberDesignationLabel(m)).includes(query)
       )
     }
 
     if (filterDepartment) {
-      filtered = filtered.filter(m => m.department === filterDepartment)
+      filtered = filtered.filter((m) => memberDepartmentLabel(m) === filterDepartment)
     }
 
     setFilteredMembers(filtered)
@@ -476,15 +521,20 @@ export default function TeamPage() {
 
   const openEditModal = (member: TeamMember) => {
     setSelectedMember(member)
+    const resolvedMemberRole =
+      resolveRole({
+        role: typeof member.role === 'string' ? member.role : null,
+        designation: memberDesignationLabel(member),
+      }) || ''
     setFormData({
       email: member.email,
       full_name: member.full_name || '',
-      department: member.department || '',
+      department: memberDepartmentLabel(member) || '',
       department_id: member.department_id || '',
       division_id: member.division_id || '',
-      designation: member.designation || '',
+      designation: memberDesignationLabel(member) || '',
       designation_id: member.designation_id || '',
-      role: normalizeRole(member.role) || '',
+      role: resolvedMemberRole,
       experience_years: member.experience_years?.toString() || '',
       skillset: member.skillset?.join(', ') || '',
       reporting_manager_id: member.reporting_manager_id || '',
@@ -496,7 +546,7 @@ export default function TeamPage() {
     setShowEditModal(true)
   }
 
-  // Master Admin and Client Admin can manage team (Client Admin is Super Admin for their org)
+  // Master Admin and Client Admin can manage team
   const canManageTeam = currentUserRole === 'master_admin' || currentUserRole === 'client_admin'
 
   if (loading) {
@@ -609,10 +659,12 @@ export default function TeamPage() {
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`px-3 py-1 rounded-full text-xs font-medium ${designationColors[member.designation?.toLowerCase() || 'junior'] || 'bg-gray-100 text-gray-700'}`}>
-                          {member.designation || '—'}
+                        <span
+                          className={`px-3 py-1 rounded-full text-xs font-medium ${designationColors[toSafeLower(memberDesignationLabel(member)) || 'junior'] || 'bg-gray-100 text-gray-700'}`}
+                        >
+                          {memberDesignationLabel(member) || '—'}
                         </span>
-                        {isNonAssignable(member.designation) && (
+                        {isNonAssignable(memberDesignationLabel(member) || null) && (
                           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 border border-red-200">
                             Non-Assignable
                           </span>
@@ -620,7 +672,7 @@ export default function TeamPage() {
                       </div>
                     </td>
                     <td className="px-6 py-4 text-sm text-muted-foreground">
-                      {member.department || '—'}
+                      {memberDepartmentLabel(member) || '—'}
                     </td>
                     <td className="px-6 py-4 text-sm text-muted-foreground">
                       {member.experience_years ? `${member.experience_years} years` : '—'}
@@ -682,7 +734,7 @@ export default function TeamPage() {
 
       {!canManageTeam && (
         <div className="mt-4 p-3 rounded-lg border border-amber-200 bg-amber-50 text-amber-700 text-sm">
-          Only Super Admin (Client Side) can create team members.
+          Only Client Admin can create team members.
         </div>
       )}
 
@@ -827,7 +879,7 @@ export default function TeamPage() {
                     className="w-full px-4 py-2 border border-input rounded-lg bg-background text-foreground"
                   >
                     <option value="">Select Manager</option>
-                    {roleBasedManagerOptions
+                    {reportingManagerOptions
                       .filter((lead) => {
                         const q = managerSearch.trim().toLowerCase()
                         if (!q) return true
@@ -939,8 +991,10 @@ export default function TeamPage() {
                 <div>
                   <h4 className="text-xl font-semibold text-foreground">{selectedMember.full_name || 'N/A'}</h4>
                   <p className="text-muted-foreground">{selectedMember.email}</p>
-                  <span className={`inline-block mt-1 px-3 py-1 rounded-full text-xs font-medium ${designationColors[selectedMember.designation?.toLowerCase() || 'junior'] || 'bg-gray-100 text-gray-700'}`}>
-                    {selectedMember.designation || '—'}
+                  <span
+                    className={`inline-block mt-1 px-3 py-1 rounded-full text-xs font-medium ${designationColors[toSafeLower(memberDesignationLabel(selectedMember)) || 'junior'] || 'bg-gray-100 text-gray-700'}`}
+                  >
+                    {memberDesignationLabel(selectedMember) || '—'}
                   </span>
                 </div>
               </div>
@@ -948,11 +1002,11 @@ export default function TeamPage() {
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
                   <p className="text-muted-foreground">Department</p>
-                  <p className="font-medium text-foreground">{selectedMember.department || '—'}</p>
+                  <p className="font-medium text-foreground">{memberDepartmentLabel(selectedMember) || '—'}</p>
                 </div>
                 <div>
                   <p className="text-muted-foreground">Designation</p>
-                  <p className="font-medium text-foreground">{selectedMember.designation || '—'}</p>
+                  <p className="font-medium text-foreground">{memberDesignationLabel(selectedMember) || '—'}</p>
                 </div>
                 <div>
                   <p className="text-muted-foreground">Experience</p>
@@ -1135,8 +1189,8 @@ export default function TeamPage() {
                   >
                     <option value="">Select Manager</option>
                     {reportingManagerOptions
-                      .filter(l => l.id !== selectedMember?.id)
-                      .map(lead => (
+                      .filter((l) => l.id !== selectedMember?.id)
+                      .map((lead) => (
                       <option key={lead.id} value={lead.id}>{lead.full_name || lead.email}</option>
                     ))}
                   </select>

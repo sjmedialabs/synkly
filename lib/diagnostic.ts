@@ -29,7 +29,7 @@ export async function checkAssignmentData() {
 
     // Check team members
     const { data: users, error: usersError } = await supabase
-      .from('users')
+      .from('team')
       .select('id, full_name, email, is_active, designation')
       .eq('is_active', true)
       .limit(5)

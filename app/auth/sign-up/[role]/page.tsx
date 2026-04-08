@@ -127,7 +127,7 @@ export default function RoleSignUpPage() {
 
       if (authError) throw authError
 
-      // Update user role in the users table (trigger should have created the row)
+      // Ensure user profile exists and role is set even when DB trigger is missing/legacy.
       if (authData.user) {
         const { data: roleData } = await supabase
           .from('roles')
@@ -135,15 +135,18 @@ export default function RoleSignUpPage() {
           .eq('name', config.key)
           .single()
 
-        if (roleData) {
-          await supabase
-            .from('users')
-            .update({ 
-              role_id: roleData.id,
-              full_name: fullName.trim(),
-            })
-            .eq('id', authData.user.id)
-        }
+        await supabase.from('team').upsert(
+          {
+            id: authData.user.id,
+            email: normalizedEmail,
+            full_name: fullName.trim(),
+            status: 'active',
+            role: config.key,
+            role_id: roleData?.id ?? null,
+            updated_at: new Date().toISOString(),
+          } as any,
+          { onConflict: 'id' },
+        )
       }
 
       router.push('/auth/sign-up-success?role=' + role)

@@ -43,7 +43,6 @@ interface Client {
 }
 
 export default function AdminClientsPage() {
-  const supabase = createClient()
   const router = useRouter()
   const [clients, setClients] = useState<Client[]>([])
   const [loading, setLoading] = useState(true)
@@ -51,37 +50,34 @@ export default function AdminClientsPage() {
 
   useEffect(() => {
     async function fetchData() {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
-        router.push('/auth/login')
-        return
-      }
+      try {
+        // Server API enforces role + access using robust auth context.
+        const clientsRes = await fetch('/api/clients')
+        const clientsJson = await clientsRes.json()
 
-      // Verify user is master admin
-      const { data: userData } = await supabase
-        .from('users')
-        .select(`roles (name)`)
-        .eq('id', user.id)
-        .single()
+        if (!clientsRes.ok) {
+          if (clientsRes.status === 401) {
+            router.push('/auth/login')
+            return
+          }
+          if (clientsRes.status === 403) {
+            router.push('/dashboard')
+            return
+          }
+          throw new Error(clientsJson?.error || 'Failed to load clients')
+        }
 
-      const roleName = (userData?.roles as any)?.name
-      if (roleName !== 'master_admin') {
-        router.push('/dashboard')
-        return
-      }
+        const clientsData = (clientsJson.clients || []) as Client[]
+        if (clientsData.length === 0) {
+          setClients([])
+          return
+        }
 
-      // Fetch clients
-      const { data: clientsData } = await supabase
-        .from('clients')
-        .select('*')
-        .order('name', { ascending: true })
-
-      if (clientsData) {
-        // Get user and project counts per client
+        const supabase = createClient()
         const clientsWithCounts = await Promise.all(
           clientsData.map(async (client) => {
             const [usersCount, projectsCount] = await Promise.all([
-              supabase.from('users').select('id', { count: 'exact', head: true }).eq('client_id', client.id),
+              supabase.from('team').select('id', { count: 'exact', head: true }).eq('client_id', client.id),
               supabase.from('projects').select('id', { count: 'exact', head: true }).eq('client_id', client.id),
             ])
             return {
@@ -91,16 +87,19 @@ export default function AdminClientsPage() {
                 projects: projectsCount.count || 0,
               },
             }
-          })
+          }),
         )
         setClients(clientsWithCounts)
+      } catch (error) {
+        console.error('[admin/clients] Failed to load clients:', error)
+        setClients([])
+      } finally {
+        setLoading(false)
       }
-
-      setLoading(false)
     }
 
     fetchData()
-  }, [router, supabase])
+  }, [router])
 
   const filteredClients = clients.filter(client =>
     client.name.toLowerCase().includes(searchQuery.toLowerCase()) ||

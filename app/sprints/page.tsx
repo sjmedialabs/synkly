@@ -54,6 +54,18 @@ export default function SprintsPage() {
   const router = useRouter()
   const supabase = createClient()
 
+  const normalizeSprint = (row: any): Sprint => ({
+    id: row.id,
+    sprint_name: row.sprint_name ?? row.name ?? '',
+    project_id: row.project_id,
+    project: row.project ?? null,
+    start_date: row.start_date ?? null,
+    end_date: row.end_date ?? null,
+    status: row.status ?? 'planned',
+    review_notes: row.review_notes ?? null,
+    created_at: row.created_at,
+  })
+
   useEffect(() => {
     async function fetchData() {
       const { data: { user } } = await supabase.auth.getUser()
@@ -63,18 +75,56 @@ export default function SprintsPage() {
         return
       }
 
-      const [sprintsRes, projectsRes] = await Promise.all([
-        supabase
-          .from('sprint_tracking')
-          .select(`
-            *,
-            project:projects(name)
-          `)
-          .order('created_at', { ascending: false }),
+      const [projectsRes] = await Promise.all([
         supabase.from('projects').select('id, name').order('name'),
       ])
 
-      setSprints(sprintsRes.data || [])
+      let modernSprintsRes = await supabase
+        .from('sprints')
+        .select(`
+          id,
+          name,
+          project_id,
+          start_date,
+          end_date,
+          status,
+          created_at,
+          project:projects(name)
+        `)
+        .order('created_at', { ascending: false })
+
+      if (!modernSprintsRes.error) {
+        setSprints((modernSprintsRes.data || []).map(normalizeSprint))
+      } else {
+        // Some environments have `sprints.sprint_name` instead of `sprints.name`
+        modernSprintsRes = await supabase
+          .from('sprints')
+          .select(`
+            id,
+            sprint_name,
+            project_id,
+            start_date,
+            end_date,
+            status,
+            created_at,
+            project:projects(name)
+          `)
+          .order('created_at', { ascending: false })
+
+        if (!modernSprintsRes.error) {
+          setSprints((modernSprintsRes.data || []).map(normalizeSprint))
+        } else {
+          const legacySprintsRes = await supabase
+            .from('sprint_tracking')
+            .select(`
+              *,
+              project:projects(name)
+            `)
+            .order('created_at', { ascending: false })
+          setSprints((legacySprintsRes.data || []).map(normalizeSprint))
+        }
+      }
+
       setProjects(projectsRes.data || [])
       setLoading(false)
     }
@@ -85,23 +135,27 @@ export default function SprintsPage() {
   const handleCreate = async () => {
     if (!formData.sprint_name.trim() || !formData.project_id) return
 
-    const { data, error } = await supabase
-      .from('sprint_tracking')
-      .insert({
-        sprint_name: formData.sprint_name,
-        project_id: formData.project_id,
-        start_date: formData.start_date || null,
-        end_date: formData.end_date || null,
-        status: formData.status,
-      })
-      .select(`
-        *,
-        project:projects(name)
-      `)
-      .single()
+    const response = await fetch('/api/sprints', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(formData),
+    })
+    const result = await response.json()
 
-    if (!error && data) {
-      setSprints([data, ...sprints])
+    if (!response.ok) {
+      alert(result?.error || 'Failed to create sprint')
+      return
+    }
+
+    if (result?.sprint) {
+      const selectedProject = projects.find((p) => p.id === formData.project_id)
+      setSprints([
+        {
+          ...normalizeSprint(result.sprint),
+          project: selectedProject ? { name: selectedProject.name } : null,
+        },
+        ...sprints,
+      ])
       setShowModal(false)
       setFormData({
         sprint_name: '',
@@ -114,10 +168,19 @@ export default function SprintsPage() {
   }
 
   const handleStatusChange = async (id: string, newStatus: string) => {
-    const { error } = await supabase
-      .from('sprint_tracking')
+    let modernUpdate = await supabase
+      .from('sprints')
       .update({ status: newStatus })
       .eq('id', id)
+
+    let error: any = modernUpdate.error
+    if (error) {
+      const legacyUpdate = await supabase
+        .from('sprint_tracking')
+        .update({ status: newStatus })
+        .eq('id', id)
+      error = legacyUpdate.error
+    }
 
     if (!error) {
       setSprints(sprints.map(s => 

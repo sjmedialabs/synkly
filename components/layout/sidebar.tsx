@@ -24,7 +24,6 @@ import {
   ChevronRight,
   Shield,
   Briefcase,
-  UserCog,
 } from 'lucide-react'
 
 interface UserWithRole {
@@ -53,16 +52,7 @@ type MenuItem = {
 // Define menu items per role
 const menuConfig: Record<RoleKey, MenuItem[]> = {
   master_admin: [
-    { label: 'Admin Dashboard', href: '/admin', icon: Shield },
     { label: 'Clients', href: '/admin/clients', icon: Building2 },
-    { label: 'All Users', href: '/admin/users', icon: Users },
-    { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { label: 'Projects', href: '/projects', icon: FolderKanban },
-    { label: 'Tasks', href: '/tasks', icon: CheckSquare },
-    { label: 'Team', href: '/team', icon: UsersRound },
-    { label: 'Milestones', href: '/milestones', icon: Milestone },
-    { label: 'Sprints', href: '/sprints', icon: Target },
-    { label: 'Reports', href: '/reports', icon: BarChart3 },
     {
       label: 'Settings', href: '/settings', icon: Settings,
       children: [
@@ -72,7 +62,6 @@ const menuConfig: Record<RoleKey, MenuItem[]> = {
   ],
   client_admin: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { label: 'Organization', href: '/organization', icon: Building2 },
     { label: 'Team Management', href: '/team', icon: UsersRound },
     { label: 'Projects', href: '/projects', icon: FolderKanban },
     { label: 'Tasks', href: '/tasks', icon: CheckSquare },
@@ -84,10 +73,7 @@ const menuConfig: Record<RoleKey, MenuItem[]> = {
     { label: 'Reports', href: '/reports', icon: BarChart3 },
     {
       label: 'Settings', href: '/organization/settings', icon: Settings,
-      children: [
-        { label: 'Master Data', href: '/organization/settings', icon: Database },
-        { label: 'Users', href: '/organization/users', icon: UserCog },
-      ]
+      children: [{ label: 'Master Data', href: '/organization/settings', icon: Database }],
     },
   ],
   manager: [
@@ -113,7 +99,6 @@ const menuConfig: Record<RoleKey, MenuItem[]> = {
   member: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { label: 'My Tasks', href: '/tasks', icon: CheckSquare },
-    { label: 'Projects', href: '/projects', icon: FolderKanban },
   ],
 }
 
@@ -125,48 +110,38 @@ export function Sidebar() {
   const router = useRouter()
   const supabase = createClient()
 
-  // Auto-expand Settings when on a settings path
+  // Auto-expand Settings when on platform or organization settings paths
   useEffect(() => {
     if (pathname.startsWith('/settings')) {
-      setExpandedItems(prev => prev.includes('/settings') ? prev : [...prev, '/settings'])
+      setExpandedItems((prev) => (prev.includes('/settings') ? prev : [...prev, '/settings']))
+    }
+    if (pathname.startsWith('/organization/settings') || pathname.startsWith('/organization/users')) {
+      setExpandedItems((prev) =>
+        prev.includes('/organization/settings') ? prev : [...prev, '/organization/settings'],
+      )
     }
   }, [pathname])
 
   useEffect(() => {
     async function fetchUser() {
-      const { data: { user: authUser } } = await supabase.auth.getUser()
-      
-      if (!authUser) {
+      const res = await fetch('/api/me')
+      if (!res.ok) {
         router.push('/auth/login')
         return
       }
-
-      const { data: userData } = await supabase
-        .from('users')
-        .select(`
-          id,
-          email,
-          full_name,
-          client_id,
-          roles (name)
-        `)
-        .eq('id', authUser.id)
-        .single()
-
-      if (userData) {
-        setUser({
-          id: userData.id,
-          email: userData.email,
-          full_name: userData.full_name,
-          role_name: (userData.roles as any)?.name as RoleKey | null,
-          client_id: userData.client_id,
-        })
-      }
+      const me = await res.json()
+      setUser({
+        id: me.userId,
+        email: me.email,
+        full_name: me.full_name,
+        role_name: me.role,
+        client_id: me.clientId,
+      })
       setLoading(false)
     }
 
     fetchUser()
-  }, [router, supabase])
+  }, [router])
 
   const handleSignOut = async () => {
     await supabase.auth.signOut()

@@ -28,7 +28,7 @@ export async function authenticateRequest(): Promise<ApiAuthContext | NextRespon
   
   // Fetch user profile with role
   const { data: userData, error: userError } = await supabase
-    .from('users')
+    .from('team')
     .select(`
       id,
       email,

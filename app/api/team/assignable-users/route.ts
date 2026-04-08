@@ -1,13 +1,14 @@
-import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { can, canAccessAll, getAuthContext } from '@/lib/rbac-server'
+import {
+  filterPeopleToAssignableTaskRoles,
+  type AssignmentPersonRow,
+} from '@/lib/people-for-assignment'
 
 // Restricted designation names
 const RESTRICTED_DESIGNATIONS = ['Super Admin', 'Delivery Manager']
 
 export async function GET(request: NextRequest) {
-  const supabase = await createClient()
-
   try {
     const ctx = await getAuthContext()
     if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -18,56 +19,57 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams
     const projectId = searchParams.get('project_id')
 
-    console.log('[assignable-users] Request with project_id:', projectId)
-
-    // Fetch all active users from users table with TEXT designation
-    const { data: allUsers, error: usersError } = await supabase
-      .from('users')
+    const admin = ctx.adminClient
+    const { data: allUsers, error: usersError } = await admin
+      .from('team')
       .select('id, email, full_name, designation, department, reporting_manager_id, is_active')
       .eq('is_active', true)
       .order('full_name', { ascending: true })
 
     if (usersError) {
-      console.error('[assignable-users] Error fetching users:', usersError)
       return NextResponse.json({ error: usersError.message }, { status: 500 })
     }
 
-    console.log('[assignable-users] Found active users:', allUsers?.length || 0)
-
-    // Filter out restricted designations (TEXT comparison)
-    const assignableUsers = (allUsers || []).filter(user => {
-      if (!user.designation) return true // Allow users without designation
-      return !RESTRICTED_DESIGNATIONS.includes(user.designation)
+    const assignableUsers = (allUsers || []).filter((user) => {
+      if (!user.designation) return true
+      return !RESTRICTED_DESIGNATIONS.includes(user.designation as string)
     })
 
-    console.log('[assignable-users] After restriction filter:', assignableUsers.length)
-
-    // If project_id provided, filter to only users on that project
     let finalUsers = assignableUsers
     if (!canAccessAll(ctx.role)) {
       finalUsers = finalUsers.filter((u) => u.reporting_manager_id === ctx.userId)
     }
+
     if (projectId) {
-      const { data: projectUsers, error: projectError } = await supabase
+      const { data: projectUsers, error: projectError } = await admin
         .from('project_users')
         .select('user_id')
         .eq('project_id', projectId)
 
-      if (projectError) {
-        console.error('[assignable-users] Error fetching project users:', projectError)
-      } else {
-        const projectUserIds = new Set((projectUsers || []).map(pu => pu.user_id))
-        finalUsers = assignableUsers.filter(u => projectUserIds.has(u.id))
-        console.log('[assignable-users] After project filter:', finalUsers.length)
+      if (!projectError && projectUsers && projectUsers.length > 0) {
+        const projectUserIds = new Set((projectUsers as { user_id: string }[]).map((pu) => pu.user_id))
+        finalUsers = finalUsers.filter((u) => projectUserIds.has(u.id))
       }
     }
 
-    console.log('[assignable-users] Returning', finalUsers.length, 'assignable users')
+    const asRows: AssignmentPersonRow[] = finalUsers.map((u: any) => ({
+      id: u.id,
+      email: String(u.email || ''),
+      full_name: u.full_name ?? null,
+      designation: u.designation ?? null,
+      department: u.department ?? null,
+      experience_years: null,
+      reporting_manager_id: u.reporting_manager_id ?? null,
+      client_id: u.client_id ?? null,
+    }))
+    const roleFiltered = await filterPeopleToAssignableTaskRoles(admin, asRows)
+    const allowedIds = new Set(roleFiltered.map((r) => r.id))
+    finalUsers = finalUsers.filter((u) => allowedIds.has(u.id))
 
     return NextResponse.json({
       users: finalUsers,
       total: finalUsers.length,
-      restrictedDesignations: RESTRICTED_DESIGNATIONS
+      restrictedDesignations: RESTRICTED_DESIGNATIONS,
     })
   } catch (err) {
     console.error('[assignable-users] Catch error:', err)

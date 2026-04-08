@@ -8,6 +8,7 @@ import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ArrowLeft, Calendar, CheckSquare, Plus, MoreVertical, X } from 'lucide-react'
+import { projectHref } from '@/lib/slug'
 
 interface Module {
   id: string
@@ -56,6 +57,7 @@ export default function ModuleDetailPage() {
   
   const [module, setModule] = useState<Module | null>(null)
   const [project, setProject] = useState<Project | null>(null)
+  const [projectSummaries, setProjectSummaries] = useState<{ id: string; name: string | null }[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddTaskModal, setShowAddTaskModal] = useState(false)
@@ -97,6 +99,9 @@ export default function ModuleDetailPage() {
 
       setModule(moduleData)
 
+      const { data: projectNameRows } = await supabase.from('projects').select('id, name')
+      setProjectSummaries(projectNameRows || [])
+
       // Fetch project
       const { data: projectData } = await supabase
         .from('projects')
@@ -128,7 +133,7 @@ export default function ModuleDetailPage() {
 
       // Fetch team members for task assignment
       const { data: teamData } = await supabase
-        .from('users')
+        .from('team')
         .select('id, full_name, email')
         .eq('is_active', true)
 
@@ -233,7 +238,7 @@ export default function ModuleDetailPage() {
             Create Task
           </Button>
           {project && (
-            <Link href={`/projects/${project.id}`}>
+            <Link href={projectHref(project, projectSummaries)}>
               <Button variant="outline" size="sm">
                 <ArrowLeft className="w-4 h-4 mr-2" />
                 Back to Project

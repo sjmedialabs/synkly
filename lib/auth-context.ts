@@ -29,7 +29,7 @@ export async function getAuthContext(): Promise<AuthContext> {
   
   // Fetch user profile with role
   const { data: userData } = await supabase
-    .from('users')
+    .from('team')
     .select(`
       id,
       email,

@@ -7,6 +7,7 @@ import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Plus, X, Users, FolderKanban, Edit2, Trash2 } from 'lucide-react'
+import { isAdminRole, normalizeRole, type RoleKey } from '@/lib/rbac'
 
 type Division = {
   id: string
@@ -20,8 +21,7 @@ type Division = {
 export default function DivisionsPage() {
   const supabase = createClient()
   const router = useRouter()
-  const [user, setUser] = useState<any>(null)
-  const [userRole, setUserRole] = useState<string | null>(null)
+  const [userRole, setUserRole] = useState<RoleKey | null>(null)
   const [divisions, setDivisions] = useState<Division[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -30,49 +30,58 @@ export default function DivisionsPage() {
   const [formData, setFormData] = useState({ name: '', description: '' })
   const [saving, setSaving] = useState(false)
 
-  const canManageDivisions = userRole && ['super_admin', 'project_manager'].includes(userRole)
+  const canManageDivisions = !!userRole && isAdminRole(userRole)
 
   useEffect(() => {
     const fetchData = async () => {
-      const { data: { user: authUser } } = await supabase.auth.getUser()
+      const {
+        data: { user: authUser },
+      } = await supabase.auth.getUser()
       if (!authUser) {
-        router.push('/login')
+        router.push('/auth/login')
         return
       }
-      setUser(authUser)
 
-      // Get current user's role
       const { data: userData } = await supabase
-        .from('users')
+        .from('team')
         .select('roles(name)')
         .eq('id', authUser.id)
         .single()
 
-      setUserRole((userData?.roles as any)?.name || null)
+      const role = normalizeRole((userData?.roles as { name?: string } | null)?.name ?? null)
+      setUserRole(role)
 
-      // Fetch divisions with counts
-      const { data: divisionsData } = await supabase
-        .from('divisions')
-        .select('*')
-        .order('name')
+      const listRes = await fetch('/api/divisions')
+      const listJson = await listRes.json()
+      if (!listRes.ok) {
+        console.error(listJson.error)
+        setDivisions([])
+        setLoading(false)
+        return
+      }
 
-      if (divisionsData) {
-        // Get counts for each division
-        const divisionsWithCounts = await Promise.all(
-          divisionsData.map(async (division) => {
+      const divisionsData = (listJson.divisions || []) as Division[]
+      const divisionsWithCounts = await Promise.all(
+        divisionsData.map(async (division) => {
+          try {
             const [usersRes, projectsRes] = await Promise.all([
-              supabase.from('users').select('id', { count: 'exact', head: true }).eq('division_id', division.id),
-              supabase.from('projects').select('id', { count: 'exact', head: true }).eq('division_id', division.id)
+              supabase.from('team').select('id', { count: 'exact', head: true }).eq('division_id', division.id),
+              supabase
+                .from('projects')
+                .select('id', { count: 'exact', head: true })
+                .eq('division_id', division.id),
             ])
             return {
               ...division,
-              user_count: usersRes.count || 0,
-              project_count: projectsRes.count || 0
+              user_count: usersRes.count ?? 0,
+              project_count: projectsRes.count ?? 0,
             }
-          })
-        )
-        setDivisions(divisionsWithCounts)
-      }
+          } catch {
+            return { ...division, user_count: 0, project_count: 0 }
+          }
+        }),
+      )
+      setDivisions(divisionsWithCounts)
 
       setLoading(false)
     }
@@ -86,17 +95,18 @@ export default function DivisionsPage() {
 
     setSaving(true)
     try {
-      const { data, error } = await supabase
-        .from('divisions')
-        .insert([{
+      const res = await fetch('/api/divisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           name: formData.name.trim(),
           description: formData.description.trim() || null,
-        }])
-        .select()
-        .single()
+        }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Failed to create')
 
-      if (error) throw error
-
+      const data = json.division
       setDivisions([...divisions, { ...data, user_count: 0, project_count: 0 }])
       setShowCreateModal(false)
       setFormData({ name: '', description: '' })
@@ -114,22 +124,29 @@ export default function DivisionsPage() {
 
     setSaving(true)
     try {
-      const { error } = await supabase
-        .from('divisions')
-        .update({
+      const res = await fetch('/api/divisions', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: editingDivision.id,
           name: formData.name.trim(),
           description: formData.description.trim() || null,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', editingDivision.id)
+        }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Failed to update')
 
-      if (error) throw error
-
-      setDivisions(divisions.map(d => 
-        d.id === editingDivision.id 
-          ? { ...d, name: formData.name.trim(), description: formData.description.trim() || null }
-          : d
-      ))
+      setDivisions(
+        divisions.map((d) =>
+          d.id === editingDivision.id
+            ? {
+                ...d,
+                name: formData.name.trim(),
+                description: formData.description.trim() || null,
+              }
+            : d,
+        ),
+      )
       setShowEditModal(false)
       setEditingDivision(null)
       setFormData({ name: '', description: '' })
@@ -145,14 +162,13 @@ export default function DivisionsPage() {
     if (!confirm('Are you sure you want to delete this division? This action cannot be undone.')) return
 
     try {
-      const { error } = await supabase
-        .from('divisions')
-        .delete()
-        .eq('id', divisionId)
+      const res = await fetch(`/api/divisions?id=${encodeURIComponent(divisionId)}`, {
+        method: 'DELETE',
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Failed to delete')
 
-      if (error) throw error
-
-      setDivisions(divisions.filter(d => d.id !== divisionId))
+      setDivisions(divisions.filter((d) => d.id !== divisionId))
     } catch (error: any) {
       console.error('Error deleting division:', error)
       alert('Error deleting division: ' + error.message)

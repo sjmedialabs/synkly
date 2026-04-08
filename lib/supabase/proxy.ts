@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { getAuthContext } from '@/lib/rbac-server'
 
 // Routes that require authentication
 const protectedRoutes = [
@@ -9,6 +10,7 @@ const protectedRoutes = [
   '/team',
   '/reports',
   '/settings',
+  '/organization',
   '/sprints',
   '/milestones',
   '/divisions',
@@ -16,8 +18,9 @@ const protectedRoutes = [
   '/admin',
 ]
 
-// Routes accessible only to specific roles
-const adminOnlyRoutes = ['/admin', '/master-data']
+// Platform admin only routes
+const platformOnlyRoutes = ['/admin']
+const platformAllowedPrefixes = ['/admin/clients', '/settings/master-data']
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
@@ -70,18 +73,24 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url)
   }
 
-  // Check admin-only routes
-  if (user && adminOnlyRoutes.some(route => pathname.startsWith(route))) {
-    // Fetch user role from database
-    const { data: userData } = await supabase
-      .from('users')
-      .select('role_id, roles(name)')
-      .eq('id', user.id)
-      .single()
+  // Check role-based route boundaries
+  if (user) {
+    // Use server-backed role resolution to avoid client-side join failures.
+    const authCtx = await getAuthContext()
+    const roleName: string | null = authCtx.role || null
 
-    const roleName = (userData?.roles as any)?.name
-    
-    if (!['master_admin', 'client_admin'].includes(roleName)) {
+    // Platform Master Admin: allow only clients + master data areas.
+    if (roleName === 'master_admin') {
+      const allowed = platformAllowedPrefixes.some((route) => pathname.startsWith(route))
+      if (!allowed && isProtectedRoute) {
+        const url = request.nextUrl.clone()
+        url.pathname = '/admin/clients'
+        return NextResponse.redirect(url)
+      }
+    }
+
+    // Non-master users cannot access /admin namespace.
+    if (platformOnlyRoutes.some(route => pathname.startsWith(route)) && roleName !== 'master_admin') {
       const url = request.nextUrl.clone()
       url.pathname = '/dashboard'
       return NextResponse.redirect(url)

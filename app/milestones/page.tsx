@@ -75,18 +75,26 @@ export default function MilestonesPage() {
       }
 
       const [milestonesRes, projectsRes] = await Promise.all([
-        supabase
-          .from('milestones')
-          .select(`
-            *,
-            project:projects(name)
-          `)
-          .order('created_at', { ascending: false }),
-        supabase.from('projects').select('id, name').order('name'),
+        fetch('/api/milestones', { credentials: 'same-origin' }),
+        fetch('/api/projects', { credentials: 'same-origin' }),
       ])
 
-      setMilestones(milestonesRes.data || [])
-      setProjects(projectsRes.data || [])
+      if (milestonesRes.ok) {
+        const m = await milestonesRes.json()
+        setMilestones(m.milestones || [])
+      } else {
+        setMilestones([])
+      }
+
+      if (projectsRes.ok) {
+        const p = await projectsRes.json()
+        const list = p.projects || []
+        setProjects(
+          list.map((proj: { id: string; name: string }) => ({ id: proj.id, name: proj.name })),
+        )
+      } else {
+        setProjects([])
+      }
       setLoading(false)
     }
 
@@ -96,11 +104,11 @@ export default function MilestonesPage() {
   const handleCreate = async () => {
     if (!formData.name.trim() || !formData.project_id) return
 
-    const { data: { user } } = await supabase.auth.getUser()
-
-    const { data, error } = await supabase
-      .from('milestones')
-      .insert({
+    const res = await fetch('/api/milestones', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         name: formData.name,
         description: formData.description || null,
         project_id: formData.project_id,
@@ -108,15 +116,15 @@ export default function MilestonesPage() {
         priority: formData.priority,
         start_date: formData.start_date || null,
         end_date: formData.end_date || null,
-        created_by: user?.id,
-      })
-      .select(`
-        *,
-        project:projects(name)
-      `)
-      .single()
-
-    if (!error && data) {
+      }),
+    })
+    const payload = await res.json()
+    if (!res.ok) {
+      alert(payload.error || 'Could not create milestone')
+      return
+    }
+    const data = payload.milestone as Milestone
+    if (data) {
       setMilestones([data, ...milestones])
       setShowModal(false)
       setFormData({
@@ -132,12 +140,13 @@ export default function MilestonesPage() {
   }
 
   const handleStatusChange = async (id: string, newStatus: string) => {
-    const { error } = await supabase
-      .from('milestones')
-      .update({ status: newStatus })
-      .eq('id', id)
-
-    if (!error) {
+    const res = await fetch('/api/milestones', {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, status: newStatus }),
+    })
+    if (res.ok) {
       setMilestones(milestones.map(m => 
         m.id === id ? { ...m, status: newStatus } : m
       ))

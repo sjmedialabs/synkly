@@ -10,7 +10,7 @@ import { ChevronLeft, ChevronRight, Plus, X, Clock, Users, AlertTriangle } from 
 
 type Employee = {
   id: string
-  full_name: string
+  full_name: string | null
   email: string
   division: { name: string } | null
 }
@@ -31,9 +31,8 @@ type CapacityWithEmployee = CapacityRecord & {
 export default function CapacityPage() {
   const supabase = createClient()
   const router = useRouter()
-  const [user, setUser] = useState<any>(null)
-  const [userRole, setUserRole] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [canManageCapacity, setCanManageCapacity] = useState(false)
   const [employees, setEmployees] = useState<Employee[]>([])
   const [capacityRecords, setCapacityRecords] = useState<CapacityWithEmployee[]>([])
   const [currentMonth, setCurrentMonth] = useState(() => {
@@ -47,34 +46,15 @@ export default function CapacityPage() {
     available_hours: '160',
   })
 
-  const canManageCapacity = userRole && ['super_admin', 'project_manager', 'delivery_manager'].includes(userRole)
-
   useEffect(() => {
     const fetchData = async () => {
-      const { data: { user: authUser } } = await supabase.auth.getUser()
+      const {
+        data: { user: authUser },
+      } = await supabase.auth.getUser()
       if (!authUser) {
-        router.push('/login')
+        router.push('/auth/login')
         return
       }
-      setUser(authUser)
-
-      // Get current user's role
-      const { data: userData } = await supabase
-        .from('users')
-        .select('roles(name)')
-        .eq('id', authUser.id)
-        .single()
-
-      setUserRole((userData?.roles as any)?.name || null)
-
-      // Fetch employees
-      const { data: employeesData } = await supabase
-        .from('users')
-        .select('id, full_name, email, division:divisions(name)')
-        .eq('is_active', true)
-        .order('full_name')
-
-      setEmployees(employeesData || [])
       setLoading(false)
     }
 
@@ -82,23 +62,34 @@ export default function CapacityPage() {
   }, [router, supabase])
 
   useEffect(() => {
+    if (loading) return
+
     const fetchCapacityForMonth = async () => {
-      const { data } = await supabase
-        .from('employee_capacity')
-        .select(`
-          *,
-          employee:users(id, full_name, email, division:divisions(name))
-        `)
-        .eq('month', currentMonth)
-        .order('employee(full_name)')
-
-      setCapacityRecords((data as CapacityWithEmployee[]) || [])
+      const res = await fetch(`/api/capacity?month=${encodeURIComponent(currentMonth)}`, {
+        credentials: 'same-origin',
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      setCapacityRecords((data.records as CapacityWithEmployee[]) || [])
+      setEmployees((data.employees as Employee[]) || [])
+      setCanManageCapacity(!!data.canManage)
     }
 
-    if (!loading) {
-      fetchCapacityForMonth()
+    fetchCapacityForMonth()
+  }, [currentMonth, loading])
+
+  useEffect(() => {
+    if (!showAddModal || loading) return
+    const refreshEmployees = async () => {
+      const res = await fetch(`/api/capacity?month=${encodeURIComponent(currentMonth)}`, {
+        credentials: 'same-origin',
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      setEmployees((data.employees as Employee[]) || [])
     }
-  }, [currentMonth, loading, supabase])
+    refreshEmployees()
+  }, [showAddModal, currentMonth, loading])
 
   const navigateMonth = (direction: 'prev' | 'next') => {
     const [year, month] = currentMonth.split('-').map(Number)
@@ -118,34 +109,27 @@ export default function CapacityPage() {
 
     setSaving(true)
     try {
-      const { data, error } = await supabase
-        .from('employee_capacity')
-        .upsert({
+      const res = await fetch('/api/capacity', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           employee_id: newCapacity.employee_id,
           month: currentMonth,
           available_hours: parseFloat(newCapacity.available_hours),
           allocated_hours: 0,
-        }, {
-          onConflict: 'employee_id,month'
-        })
-        .select(`
-          *,
-          employee:users(id, full_name, email, division:divisions(name))
-        `)
-        .single()
+        }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.error || 'Save failed')
 
-      if (error) throw error
+      const data = payload.record as CapacityWithEmployee
 
-      // Update or add to records
-      const existingIndex = capacityRecords.findIndex(
-        r => r.employee_id === newCapacity.employee_id
-      )
+      const existingIndex = capacityRecords.findIndex((r) => r.employee_id === newCapacity.employee_id)
       if (existingIndex >= 0) {
-        setCapacityRecords(prev => prev.map((r, i) => 
-          i === existingIndex ? (data as CapacityWithEmployee) : r
-        ))
+        setCapacityRecords((prev) => prev.map((r, i) => (i === existingIndex ? data : r)))
       } else {
-        setCapacityRecords(prev => [...prev, data as CapacityWithEmployee])
+        setCapacityRecords((prev) => [...prev, data])
       }
 
       setShowAddModal(false)
@@ -160,16 +144,17 @@ export default function CapacityPage() {
 
   const updateCapacity = async (recordId: string, field: 'available_hours' | 'allocated_hours', value: number) => {
     try {
-      const { error } = await supabase
-        .from('employee_capacity')
-        .update({ [field]: value, updated_at: new Date().toISOString() })
-        .eq('id', recordId)
+      const res = await fetch('/api/capacity', {
+        method: 'PATCH',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: recordId, [field]: value }),
+      })
+      const payload = await res.json()
+      if (!res.ok) throw new Error(payload.error || 'Update failed')
 
-      if (error) throw error
-
-      setCapacityRecords(prev => prev.map(r => 
-        r.id === recordId ? { ...r, [field]: value, remaining_hours: field === 'available_hours' ? value - r.allocated_hours : r.available_hours - value } : r
-      ))
+      const record = payload.record as CapacityWithEmployee
+      setCapacityRecords((prev) => prev.map((r) => (r.id === recordId ? record : r)))
     } catch (error: any) {
       console.error('Error updating capacity:', error)
       alert('Error updating capacity: ' + error.message)
@@ -268,8 +253,10 @@ export default function CapacityPage() {
                     return (
                       <tr key={record.id} className={`hover:bg-muted/50 transition ${isOverallocated ? 'bg-destructive/5' : ''}`}>
                         <td className="px-4 py-3">
-                          <p className="font-medium text-foreground">{record.employee?.full_name || 'Unknown'}</p>
-                          <p className="text-xs text-muted-foreground">{record.employee?.email}</p>
+                          <p className="font-medium text-foreground">
+                            {record.employee?.full_name?.trim() || record.employee?.email?.trim() || 'Unknown'}
+                          </p>
+                          <p className="text-xs text-muted-foreground">{record.employee?.email || '—'}</p>
                         </td>
                         <td className="px-4 py-3 text-sm text-muted-foreground">
                           {record.employee?.division?.name || '—'}

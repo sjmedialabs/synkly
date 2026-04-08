@@ -64,7 +64,7 @@ export default function OrganizationUsersPage() {
 
       // Get user's client_id and role
       const { data: userData } = await supabase
-        .from('users')
+        .from('team')
         .select(`
           client_id,
           roles (name)
@@ -89,7 +89,7 @@ export default function OrganizationUsersPage() {
 
       // Fetch users for this client
       const { data: usersData } = await supabase
-        .from('users')
+        .from('team')
         .select(`
           id,
           email,

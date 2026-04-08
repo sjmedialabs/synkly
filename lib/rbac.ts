@@ -20,8 +20,8 @@ export const ROLE_LABELS: Record<RoleKey, string> = {
 }
 
 export const ROLE_DESCRIPTIONS: Record<RoleKey, string> = {
-  master_admin: 'Full system access across all clients (Platform Super Admin)',
-  client_admin: 'Full access within organization - create users, manage projects, teams, and settings (Client Super Admin)',
+  master_admin: 'Full system access across all clients (Platform Admin)',
+  client_admin: 'Full access within organization - create users, manage projects, teams, and settings (Client Admin)',
   manager: 'Create and manage projects, assign tasks within the organization',
   team_lead: 'Lead teams and assign tasks to team members',
   member: 'Work on assigned tasks and update progress',
@@ -30,7 +30,7 @@ export const ROLE_DESCRIPTIONS: Record<RoleKey, string> = {
 export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
   master_admin: ['ALL'],
   client_admin: [
-    'ALL_CLIENT', // Full access within client scope - Super Admin for their organization
+    'ALL_CLIENT', // Full access within client scope - Client Admin for their organization
     'VIEW_ALL_CLIENTS',
     'MANAGE_OWN_CLIENT',
     'CREATE_USER',
@@ -131,11 +131,26 @@ export function resolveRole(user: any): RoleKey | null {
   if (user?.role_name) {
     return normalizeRole(user.role_name)
   }
+  const joined = user?.roles
+  const joinedName =
+    joined && typeof joined === 'object' && !Array.isArray(joined)
+      ? (joined as { name?: string }).name
+      : Array.isArray(joined)
+        ? (joined[0] as { name?: string } | undefined)?.name
+        : undefined
+  if (joinedName) {
+    return normalizeRole(joinedName)
+  }
   if (user?.role?.name) {
     return normalizeRole(user.role.name)
   }
   if (user?.role) {
     return normalizeRole(user.role)
+  }
+  // Last-resort inference for legacy rows where role_id/role might be missing
+  // but designation contains values like "Super Admin", "Project Manager", etc.
+  if (user?.designation) {
+    return normalizeRole(user.designation)
   }
   return null
 }
@@ -151,11 +166,17 @@ export function canAccessResource(userRole: RoleKey | null, requiredRole: RoleKe
   return ROLE_LEVELS[userRole] >= ROLE_LEVELS[requiredRole]
 }
 
+/** Task assignee picker: team lead and member only (exclude manager, client_admin, master_admin). */
+export function isAssignableTaskRole(role: RoleKey | null): boolean {
+  if (!role) return false
+  return ROLE_LEVELS[role] <= ROLE_LEVELS.team_lead
+}
+
 export function isFullAccessRole(role: RoleKey | null): boolean {
   return role === 'master_admin'
 }
 
-// Client Admin is Super Admin within their client scope
+// Client Admin is top-level admin within their client scope
 export function isClientSuperAdmin(role: RoleKey | null): boolean {
   return role === 'client_admin'
 }
@@ -183,6 +204,16 @@ export function canAssignRoles(role: RoleKey | null): boolean {
 
 export function canManageProjects(role: RoleKey | null): boolean {
   return role === 'master_admin' || role === 'client_admin' || role === 'manager'
+}
+
+/** Create modules under a project (not available to plain members). */
+export function canCreateModules(role: RoleKey | null): boolean {
+  return (
+    role === 'master_admin' ||
+    role === 'client_admin' ||
+    role === 'manager' ||
+    role === 'team_lead'
+  )
 }
 
 export function canDeleteProjects(role: RoleKey | null): boolean {

@@ -1,6 +1,16 @@
+import { randomUUID } from 'crypto'
 import { createClient as createServerClient } from '@/lib/supabase/server'
 import { createClient } from '@supabase/supabase-js'
-import { type RoleKey, hasPermission, isFullAccessRole, isAdminRole, canManageProjects, canAssignTasks } from '@/lib/rbac'
+import {
+  type RoleKey,
+  hasPermission,
+  isFullAccessRole,
+  isAdminRole,
+  canManageProjects,
+  canAssignTasks,
+  resolveRole,
+  normalizeRole,
+} from '@/lib/rbac'
 
 export function getAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -9,6 +19,28 @@ export function getAdminClient() {
   return createClient(supabaseUrl, serviceRole, {
     auth: { autoRefreshToken: false, persistSession: false },
   })
+}
+
+/** Insert or update `public.clients` so `projects.client_id` FK can reference this id. */
+export async function upsertClientRowForFk(
+  admin: ReturnType<typeof getAdminClient>,
+  id: string,
+  fields: { name: string; email: string | null },
+) {
+  return admin
+    .from('clients')
+    .upsert(
+      {
+        id,
+        name: fields.name,
+        email: fields.email,
+        company: fields.name,
+        is_active: true,
+      } as Record<string, unknown>,
+      { onConflict: 'id' },
+    )
+    .select('id')
+    .single()
 }
 
 export interface AuthContextResult {
@@ -44,36 +76,205 @@ export async function getAuthContext(): Promise<AuthContextResult> {
     }
   }
   
-  // Fetch user with role from joined roles table
-  const { data: userData } = await adminClient
-    .from('users')
-    .select(`
-      id, 
-      email,
-      client_id,
-      status,
-      roles (name)
-    `)
-    .eq('id', user.id)
-    .single()
-  
-  const roleName = (userData?.roles as any)?.name as RoleKey | null
-  const clientId = userData?.client_id || null
-  
+  const teamCheck = await adminClient.from('team').select('id').limit(1)
+  const usersCheck = await adminClient.from('users').select('id').limit(1)
+  const peopleTable: 'team' | 'users' | null = !teamCheck.error ? 'team' : !usersCheck.error ? 'users' : null
+
+  // Prefer peopleTable.role + roles join; fall back if role column is absent in older DBs
+  let userData: any = null
+  if (peopleTable) {
+    const withRoleCol = await adminClient
+      .from(peopleTable)
+      .select(
+        `
+        id,
+        email,
+        client_id,
+        status,
+        role,
+        designation,
+        roles (name)
+      `,
+      )
+      .eq('id', user.id)
+      .single()
+
+    if (!withRoleCol.error) {
+      userData = withRoleCol.data
+    } else {
+      const joinOnly = await adminClient
+        .from(peopleTable)
+        .select(
+          `
+          id,
+          email,
+          client_id,
+          status,
+          designation,
+          roles (name)
+        `,
+        )
+        .eq('id', user.id)
+        .single()
+      if (!joinOnly.error) {
+        userData = joinOnly.data
+      } else {
+        const explicitFk = await adminClient
+          .from(peopleTable)
+          .select(
+            `
+            id,
+            email,
+            client_id,
+            status,
+            designation,
+            role_id,
+            roles:role_id (name)
+          `,
+          )
+          .eq('id', user.id)
+          .single()
+        if (!explicitFk.error) {
+          userData = explicitFk.data as any
+        } else {
+          const legacyRole = await adminClient
+            .from(peopleTable)
+            .select('id, email, client_id, status, role, designation')
+            .eq('id', user.id)
+            .single()
+          userData = legacyRole.data
+        }
+      }
+    }
+  }
+
+  let role = resolveRole(userData)
+  if (!role) {
+    const metaRole = normalizeRole((user as any)?.user_metadata?.role)
+    role = metaRole || null
+  }
+  if (!role && userData?.role_id) {
+    // Avoid relationship/join issues by resolving role_id directly.
+    const { data: roleRow } = await adminClient
+      .from('roles')
+      .select('name')
+      .eq('id', userData.role_id)
+      .maybeSingle()
+    role = roleRow?.name ? normalizeRole(roleRow.name) : role
+  }
+  const meta = (user as { user_metadata?: { client_id?: unknown } })?.user_metadata
+  const metaClientId = typeof meta?.client_id === 'string' ? meta.client_id : null
+  const clientId = userData?.client_id || metaClientId || null
+
   return {
     userId: user.id,
     email: userData?.email || user.email || null,
-    role: roleName,
+    role,
     clientId,
     tenantId: clientId, // Keep for backward compatibility
     adminClient,
-    isMasterAdmin: roleName === 'master_admin',
-    isClientAdmin: roleName === 'client_admin',
+    isMasterAdmin: role === 'master_admin',
+    isClientAdmin: role === 'client_admin',
   }
+}
+
+/**
+ * Ensures tenant id for users who can own projects but have no `client_id` yet.
+ * - Tries `public.clients` insert when available.
+ * - If that fails, reuses or generates a stable UUID and **upserts `public.clients`** so
+ *   `projects.client_id` FK (when present) still resolves.
+ */
+export async function provisionClientForClientAdminIfMissing(ctx: AuthContextResult): Promise<string | null> {
+  if (!ctx.userId) return null
+  if (ctx.role !== 'client_admin' && ctx.role !== 'manager') return null
+  if (ctx.clientId) return ctx.clientId
+
+  const admin = ctx.adminClient
+  const teamOk = !(await admin.from('team').select('id').limit(1)).error
+  const usersOk = !(await admin.from('users').select('id').limit(1)).error
+  const peopleTable: 'team' | 'users' | null = teamOk ? 'team' : usersOk ? 'users' : null
+
+  const profileRes = peopleTable
+    ? await admin.from(peopleTable).select('*').eq('id', ctx.userId).maybeSingle()
+    : { data: null as any, error: null }
+
+  const stampPeopleAndAuth = async (tenantId: string) => {
+    if (peopleTable) {
+      await admin.from(peopleTable).upsert(
+        {
+          id: ctx.userId,
+          email: profileRes.data?.email || ctx.email || null,
+          full_name: profileRes.data?.full_name || profileRes.data?.name || null,
+          client_id: tenantId,
+          updated_at: new Date().toISOString(),
+        } as any,
+        { onConflict: 'id' },
+      )
+    }
+    const authUserRes = await admin.auth.admin.getUserById(ctx.userId!)
+    if (!authUserRes.error && authUserRes.data?.user) {
+      const userMetadata = authUserRes.data.user.user_metadata || {}
+      await admin.auth.admin.updateUserById(ctx.userId!, {
+        user_metadata: { ...userMetadata, client_id: tenantId },
+      })
+    }
+  }
+
+  const orgNameBase = String(
+    profileRes.data?.full_name || profileRes.data?.name || ctx.email?.split('@')[0] || 'Client',
+  ).trim()
+  const orgName = `${orgNameBase} Organization`
+
+  const createdClient = await admin
+    .from('clients')
+    .insert({
+      name: orgName,
+      email: ctx.email || null,
+      company: orgName,
+      is_active: true,
+    } as any)
+    .select('id')
+    .single()
+
+  if (!createdClient.error && createdClient.data?.id) {
+    const newId = createdClient.data.id as string
+    await stampPeopleAndAuth(newId)
+    return newId
+  }
+
+  console.warn(
+    '[provisionClient] clients insert failed; will upsert by stable id:',
+    createdClient.error?.message,
+  )
+
+  const authPeek = await admin.auth.admin.getUserById(ctx.userId)
+  if (authPeek.error || !authPeek.data?.user) return null
+  const meta = (authPeek.data.user.user_metadata || {}) as Record<string, unknown>
+  let virtualId = typeof meta.client_id === 'string' ? meta.client_id : null
+  if (!virtualId) {
+    virtualId = randomUUID()
+  }
+
+  const upsertRes = await upsertClientRowForFk(admin, virtualId, {
+    name: orgName,
+    email: ctx.email || null,
+  })
+  if (upsertRes.error || !upsertRes.data?.id) {
+    console.warn('[provisionClient] clients upsert failed:', upsertRes.error?.message)
+    return null
+  }
+
+  await stampPeopleAndAuth(virtualId)
+  return virtualId
 }
 
 export function canAccessAll(role: RoleKey | null): boolean {
   return isFullAccessRole(role) || isAdminRole(role)
+}
+
+/** Master data mutations: platform admin, client admin, or explicit permission */
+export function canMutateMasterData(role: RoleKey | null): boolean {
+  return isFullAccessRole(role) || isAdminRole(role) || hasPermission(role, 'MANAGE_MASTER_DATA')
 }
 
 export function can(role: RoleKey | null, permission: string): boolean {

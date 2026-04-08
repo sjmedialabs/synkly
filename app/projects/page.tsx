@@ -6,7 +6,8 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
-import { Plus, FolderKanban, Pencil } from 'lucide-react'
+import { Plus, FolderKanban, Pencil, Eye } from 'lucide-react'
+import { projectEditHref, projectHref } from '@/lib/slug'
 
 export default function ProjectsPage() {
   const supabase = createClient()
@@ -28,7 +29,7 @@ export default function ProjectsPage() {
 
       // Fetch user's role via role_id join
       const { data: userData } = await supabase
-        .from('users')
+        .from('team')
         .select('role_id, roles:role_id (name)')
         .eq('id', user.id)
         .single()
@@ -46,6 +47,15 @@ export default function ProjectsPage() {
           return
         }
         console.error('Failed to fetch projects:', projectsJson?.error)
+        try {
+          const meRes = await fetch('/api/me')
+          if (meRes.ok) {
+            const me = await meRes.json()
+            if (me?.role) setUserRole(me.role)
+          }
+        } catch {
+          /* ignore */
+        }
         setProjects([])
         setLoading(false)
         return
@@ -109,12 +119,16 @@ export default function ProjectsPage() {
         </div>
       ) : (
         <div className="bg-card border border-border rounded-lg overflow-hidden">
+          {(() => {
+            const projectSummaries = projects.map((p: any) => ({ id: p.id, name: p.name as string | null }))
+            return (
           <table className="w-full">
             <thead className="bg-muted border-b border-border">
               <tr>
                 <th className="px-4 py-2 text-left text-sm font-semibold text-foreground">Project Name</th>
+                <th className="px-4 py-2 text-left text-sm font-semibold text-foreground">Total Modules</th>
+                <th className="px-4 py-2 text-left text-sm font-semibold text-foreground">Total Tasks</th>
                 <th className="px-4 py-2 text-left text-sm font-semibold text-foreground">Total Estimation</th>
-                <th className="px-4 py-2 text-left text-sm font-semibold text-foreground">Estimated Date of Delivery</th>
                 <th className="px-4 py-2 text-right text-sm font-semibold text-foreground">Actions</th>
               </tr>
             </thead>
@@ -122,47 +136,33 @@ export default function ProjectsPage() {
               {projects.map((project: any) => (
                 <tr key={project.id} className="hover:bg-muted/40 transition">
                   <td className="px-4 py-2">
-                    <Link href={`/projects/${project.id}`} className="text-primary hover:underline font-medium">
+                    <Link href={projectHref(project, projectSummaries)} className="text-primary hover:underline font-medium">
                       {project.name}
                     </Link>
                   </td>
-                  <td className="px-4 py-2">{project.totalEstimation}h</td>
-                  <td className="px-4 py-2 text-sm text-muted-foreground">
-                    {project.projected_end_date
-                      ? new Date(project.projected_end_date).toLocaleDateString()
-                      : '—'}
-                  </td>
+                  <td className="px-4 py-2">{project.moduleCount || 0}</td>
+                  <td className="px-4 py-2">{project.taskStats?.total || 0}</td>
+                  <td className="px-4 py-2">{project.taskStats?.estimation || 0}h</td>
                   <td className="px-4 py-2">
                     <div className="flex justify-end gap-2">
-                      <Link href={`/projects/${project.id}`}>
-                        <Button size="sm" variant="outline">View</Button>
+                      <Link href={projectHref(project, projectSummaries)}>
+                        <Button size="sm" variant="outline" title="View Project" aria-label="View Project">
+                          <Eye className="w-4 h-4" />
+                        </Button>
                       </Link>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={async () => {
-                          const newName = prompt('Rename project', project.name)
-                          if (!newName || !newName.trim() || newName.trim() === project.name) return
-                          const { error } = await supabase
-                            .from('projects')
-                            .update({ name: newName.trim(), updated_at: new Date().toISOString() })
-                            .eq('id', project.id)
-                          if (!error) {
-                            setProjects((prev) =>
-                              prev.map((p) => (p.id === project.id ? { ...p, name: newName.trim() } : p)),
-                            )
-                          }
-                        }}
-                      >
-                        <Pencil className="w-4 h-4 mr-1" />
-                        Rename
-                      </Button>
+                      <Link href={projectEditHref(project, projectSummaries)}>
+                        <Button size="sm" variant="outline" title="Edit Project" aria-label="Edit Project">
+                          <Pencil className="w-4 h-4" />
+                        </Button>
+                      </Link>
                     </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+            )
+          })()}
         </div>
       )}
     </DashboardLayout>

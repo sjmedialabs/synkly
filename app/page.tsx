@@ -52,16 +52,11 @@ export default function Home() {
             </p>
           </div>
 
-          {/* CTA Buttons */}
-          <div className="flex gap-4 justify-center pt-4">
+          {/* CTA */}
+          <div className="flex justify-center pt-4">
             <Link href="/auth/login">
               <button className="px-8 py-3 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 transition">
                 Sign In
-              </button>
-            </Link>
-            <Link href="/auth/sign-up">
-              <button className="px-8 py-3 bg-accent text-accent-foreground rounded-lg font-semibold hover:bg-accent/90 transition">
-                Get Started
               </button>
             </Link>
           </div>

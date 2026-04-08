@@ -1,7 +1,7 @@
 'use client'
 
 import { createClient } from '@/lib/supabase/client'
-import { type RoleKey, ROLE_PERMISSIONS, ROLE_LEVELS, type UserWithRole } from '@/lib/rbac'
+import { normalizeRole, type RoleKey, ROLE_PERMISSIONS, ROLE_LEVELS, type UserWithRole } from '@/lib/rbac'
 import { useEffect, useState, useCallback } from 'react'
 import type { User } from '@supabase/supabase-js'
 
@@ -29,35 +29,40 @@ export function useAuth(): UseAuthReturn {
 
   const fetchUserProfile = useCallback(async (authUserId: string) => {
     const supabase = createClient()
-    
-    const { data } = await supabase
-      .from('users')
-      .select(`
-        id,
-        email,
-        full_name,
-        client_id,
-        status,
-        roles (
-          name,
-          permissions
-        )
-      `)
-      .eq('id', authUserId)
-      .single()
 
-    if (data) {
-      const roleName = (data.roles as any)?.name as RoleKey | undefined
-      const rolePermissions = (data.roles as any)?.permissions || null
-      
+    try {
+      const meRes = await fetch('/api/me')
+      if (meRes.ok) {
+        const me = await meRes.json()
+        const st = me.status as string | undefined
+        setUser({
+          id: me.userId,
+          email: me.email,
+          full_name: me.full_name,
+          role_name: me.role,
+          role_permissions: null,
+          client_id: me.clientId,
+          status:
+            st === 'suspended' || st === 'inactive' || st === 'active' ? st : 'active',
+        })
+        return
+      }
+    } catch {
+      /* fall back to auth session only */
+    }
+
+    const { data: authData } = await supabase.auth.getUser()
+    const authUser = authData.user
+    if (authUser?.id === authUserId) {
+      const meta = (authUser.user_metadata || {}) as Record<string, unknown>
       setUser({
-        id: data.id,
-        email: data.email,
-        full_name: data.full_name,
-        role_name: roleName || null,
-        role_permissions: rolePermissions,
-        client_id: data.client_id,
-        status: data.status as 'active' | 'inactive' | 'suspended',
+        id: authUser.id,
+        email: authUser.email || '',
+        full_name: (typeof meta.full_name === 'string' && meta.full_name) || null,
+        role_name: normalizeRole(meta.role as string) || null,
+        role_permissions: null,
+        client_id: (typeof meta.client_id === 'string' ? meta.client_id : null) || null,
+        status: 'active',
       })
     }
   }, [])

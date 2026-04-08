@@ -8,6 +8,14 @@ import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { ArrowLeft, ArrowRight, Check } from 'lucide-react'
+import { projectHref } from '@/lib/slug'
+import { canManageProjects, resolveRole, ROLE_LEVELS } from '@/lib/rbac'
+
+function isTeamLeadOrAbove(row: unknown): boolean {
+  const r = resolveRole(row as any)
+  if (!r) return false
+  return ROLE_LEVELS[r] >= ROLE_LEVELS.team_lead
+}
 type DepartmentSource = 'master_table' | 'users_text'
 
 type Department = {
@@ -63,6 +71,15 @@ export default function NewProjectPage() {
           return
         }
 
+        const meRes = await fetch('/api/me')
+        if (meRes.ok) {
+          const me = await meRes.json()
+          if (!canManageProjects(me.role)) {
+            router.push('/projects')
+            return
+          }
+        }
+
         // Preferred source: centralized master-data API
         const departmentsRes = await fetch('/api/master-data/values?type=department')
         if (departmentsRes.ok) {
@@ -99,7 +116,7 @@ export default function NewProjectPage() {
 
         // Fallback source: distinct department names from legacy users table
         const { data: usersData, error: usersError } = await supabase
-          .from('users')
+          .from('team')
           .select('department')
           .eq('is_active', true)
           .not('department', 'is', null)
@@ -133,40 +150,41 @@ export default function NewProjectPage() {
   }, [router, supabase])
 
   const fetchTeamLeads = async (department: Department) => {
-    // Primary query for normalized schema
-    if (department.source === 'master_table') {
-      const { data, error } = await supabase
-        .from('users')
-        .select('id, full_name, email')
-        .eq('department_id', department.id) // from master_data_values
-        .eq('is_active', true)
-        .order('full_name')
-
-      if (!error && data && data.length > 0) {
-        setTeamLeads(data)
+    try {
+      // Use server API (schema-tolerant fallback: team/users/auth).
+      const res = await fetch('/api/team')
+      const json = await res.json()
+      if (!res.ok) {
+        console.error('Failed to load team leads from /api/team:', json?.error)
+        setTeamLeads([])
         return
       }
+      const users = ((json.users || json.data || []) as any[]).filter((u) => u?.is_active !== false)
 
-      if (error) {
-        console.warn('department_id query failed, falling back to text department:', error.message)
-      }
-    }
+      const byDepartment = users.filter((u) => {
+        if (department.source === 'master_table') {
+          return u.department_id === department.id || u.department_name === department.name
+        }
+        return u.department === department.name || u.department_name === department.name
+      })
 
-    // Fallback query for legacy schema
-    const { data: legacyData, error: legacyError } = await supabase
-      .from('users')
-      .select('id, full_name, email')
-      .eq('department', department.name)
-      .eq('is_active', true)
-      .order('full_name')
+      // Project lead: team_lead, manager, client_admin, master_admin only (not members).
+      const eligible = byDepartment.filter((u) => isTeamLeadOrAbove(u))
 
-    if (legacyError) {
-      console.error('Legacy department query failed:', legacyError)
+      const mapped: TeamLead[] = eligible
+        .map((u) => ({
+          id: String(u.id),
+          full_name: u.full_name || u.name || null,
+          email: String(u.email || ''),
+        }))
+        .filter((u) => !!u.id && !!u.email)
+        .sort((a, b) => (a.full_name || a.email).localeCompare(b.full_name || b.email))
+
+      setTeamLeads(mapped)
+    } catch (error) {
+      console.error('Error fetching team leads:', error)
       setTeamLeads([])
-      return
     }
-
-    setTeamLeads(legacyData || [])
   }
 
   const handleDepartmentSelect = async (department: Department) => {
@@ -195,6 +213,8 @@ export default function NewProjectPage() {
         return selectedTeamLead !== null
       case 3:
         return projectData.name.trim() !== ''
+      case 4:
+        return selectedDepartment !== null && selectedTeamLead !== null && projectData.name.trim() !== ''
       default:
         return false
     }
@@ -210,7 +230,7 @@ export default function NewProjectPage() {
         description: projectData.description.trim() || null,
         priority: projectData.priority,
         status: 'active',
-        team_lead_id: selectedTeamLead.id,
+        project_lead_id: selectedTeamLead.id,
         onboarded_date: projectData.onboarded_date || null,
         assigned_date: projectData.assigned_date || null,
         projected_end_date: projectData.projected_end_date || null,
@@ -228,10 +248,13 @@ export default function NewProjectPage() {
       })
       const result = await response.json()
       if (!response.ok || !result?.project?.id) {
-        throw new Error(result?.error || 'Failed to create project')
+        const detail = [result?.error, result?.hint].filter(Boolean).join(' — ')
+        throw new Error(detail || 'Failed to create project')
       }
 
-      router.push(`/projects/${result.project.id}`)
+      // Avoid browser `from('projects')` here: same PostgREST schema as the API; for a new row,
+      // slug disambiguation only needs this project.
+      router.push(projectHref(result.project, [result.project]))
     } catch (error: any) {
       console.error('Error creating project:', error)
       alert('Error creating project: ' + error.message)

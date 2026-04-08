@@ -4,6 +4,13 @@ import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
+import {
+  projectHref,
+  projectModuleHref,
+  projectUrlSegment,
+  resolveProjectFromRef,
+} from '@/lib/slug'
+import { canCreateModules } from '@/lib/rbac'
 import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -59,33 +66,51 @@ const statusColors: Record<string, string> = {
 
 export default function ProjectDetailPage() {
   const params = useParams()
-  const projectId = params.id as string
-  
+  const projectRef = params.id as string
+
   const [project, setProject] = useState<Project | null>(null)
+  const [projectSummaries, setProjectSummaries] = useState<{ id: string; name: string | null }[]>([])
   const [modules, setModules] = useState<Module[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddModuleModal, setShowAddModuleModal] = useState(false)
   const [newModuleName, setNewModuleName] = useState('')
   const [creatingModule, setCreatingModule] = useState(false)
-  
+  const [canAddModule, setCanAddModule] = useState(false)
+
   const router = useRouter()
   const supabase = createClient()
 
   useEffect(() => {
     async function fetchData() {
-      const { data: { user } } = await supabase.auth.getUser()
-      
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+
       if (!user) {
         router.push('/auth/login')
         return
       }
 
-      // Fetch project details
+      const meRes = await fetch('/api/me')
+      if (meRes.ok) {
+        const me = await meRes.json()
+        setCanAddModule(canCreateModules(me.role))
+      }
+
+      const { data: summaryRows } = await supabase.from('projects').select('id, name')
+      const summaries = summaryRows || []
+      const resolved = resolveProjectFromRef(projectRef, summaries)
+      if (!resolved) {
+        router.push('/projects')
+        return
+      }
+      const resolvedProjectId = resolved.id
+
       const { data: projectData, error } = await supabase
         .from('projects')
         .select('*')
-        .eq('id', projectId)
+        .eq('id', resolvedProjectId)
         .single()
 
       if (error || !projectData) {
@@ -94,46 +119,56 @@ export default function ProjectDetailPage() {
       }
 
       setProject(projectData)
+      setProjectSummaries(summaries)
 
-      // Fetch related data (single tasks fetch used for module aggregation)
-      const [modulesResModern, tasksRes] = await Promise.all([
-        supabase
-          .from('modules')
-          .select('id, name, description, estimated_hours, status, is_active')
-          .eq('project_id', projectId)
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('tasks')
-          .select(`
-            id,
-            status,
-            module_id,
-            estimation,
-            estimated_hours
-          `)
-          .eq('project_id', projectId)
-          .order('created_at', { ascending: false }),
-      ])
-
-      // Backward compatibility for environments without modules.is_active yet
-      let finalModules = modulesResModern.data as Module[] | null
-      if (modulesResModern.error) {
-        const modulesResLegacy = await supabase
-          .from('modules')
-          .select('id, name, description, estimated_hours, status')
-          .eq('project_id', projectId)
-          .order('created_at', { ascending: false })
-
-        finalModules = (modulesResLegacy.data || []).map((m: any) => ({ ...m, is_active: true }))
+      const segment = projectUrlSegment(projectData, summaries)
+      if (decodeURIComponent(projectRef).trim() !== segment) {
+        router.replace(projectHref(projectData, summaries))
       }
 
-      setModules(finalModules || [])
-      setTasks((tasksRes.data as Task[]) || [])
+      const modulesRes = await supabase
+        .from('modules')
+        .select('*')
+        .eq('project_id', resolvedProjectId)
+        .order('created_at', { ascending: false })
+
+      const finalModules = ((modulesRes.data || []) as any[]).map((m) => ({
+        id: m.id,
+        name: m.name || 'Untitled Module',
+        description: m.description ?? null,
+        estimated_hours: Number(m.estimated_hours ?? 0),
+        status: String(m.status || 'active'),
+        is_active: m.is_active ?? true,
+      })) as Module[]
+
+      let finalTasks: Task[] = []
+      const tasksByProject = await supabase
+        .from('tasks')
+        .select('*')
+        .eq('project_id', resolvedProjectId)
+        .order('created_at', { ascending: false })
+
+      if (!tasksByProject.error) {
+        finalTasks = (tasksByProject.data || []) as Task[]
+      } else if (finalModules.length > 0) {
+        const moduleIds = finalModules.map((m) => m.id).filter(Boolean)
+        if (moduleIds.length > 0) {
+          const tasksByModules = await supabase
+            .from('tasks')
+            .select('*')
+            .in('module_id', moduleIds)
+            .order('created_at', { ascending: false })
+          finalTasks = (tasksByModules.data || []) as Task[]
+        }
+      }
+
+      setModules(finalModules)
+      setTasks(finalTasks)
       setLoading(false)
     }
 
     fetchData()
-  }, [projectId, router, supabase])
+  }, [projectRef, router, supabase])
 
   if (loading) {
     return (
@@ -180,62 +215,39 @@ export default function ProjectDetailPage() {
 
   const handleAddModule = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!newModuleName.trim() || !projectId) return
+    if (!newModuleName.trim() || !project) return
 
     setCreatingModule(true)
     try {
-      const { data, error } = await supabase
-        .from('modules')
-        .insert([{
-          project_id: projectId,
-          name: newModuleName.trim(),
-          created_at: new Date().toISOString(),
-        }])
-        .select()
-
-      if (error) throw error
-
-      if (data) {
-        setModules([
-          ...modules,
-          {
-            ...(data[0] as Module),
-            is_active: (data[0] as any).is_active ?? true,
-          },
-        ])
-        setNewModuleName('')
-        setShowAddModuleModal(false)
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectRef)}/modules`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newModuleName.trim() }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json.module) {
+        const msg = [json.error, json.hint].filter(Boolean).join(' — ') || 'Failed to create module'
+        throw new Error(msg)
       }
+      const row = json.module as Record<string, unknown>
+      setModules([
+        ...modules,
+        {
+          id: String(row.id),
+          name: String(row.name || 'Untitled Module'),
+          description: (row.description as string | null) ?? null,
+          estimated_hours: Number(row.estimated_hours ?? 0),
+          status: String(row.status || 'not_started'),
+          is_active: (row.is_active as boolean | undefined) ?? true,
+        },
+      ])
+      setNewModuleName('')
+      setShowAddModuleModal(false)
     } catch (error: any) {
       console.error('Error creating module:', error)
       alert('Error creating module: ' + error.message)
     } finally {
       setCreatingModule(false)
-    }
-  }
-
-  const handleToggleModuleActive = async (moduleId: string, currentValue: boolean) => {
-    try {
-      const response = await fetch('/api/modules/update-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          module_id: moduleId,
-          is_active: !currentValue,
-        }),
-      })
-      const data = await response.json()
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to update module status')
-      }
-
-      setModules((prev) =>
-        prev.map((module) =>
-          module.id === moduleId ? { ...module, is_active: !currentValue } : module,
-        ),
-      )
-    } catch (error: any) {
-      alert('Failed to update module status')
     }
   }
 
@@ -336,6 +348,7 @@ export default function ProjectDetailPage() {
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>Modules</CardTitle>
             <div className="flex gap-2">
+              {canAddModule && (
               <Button 
                 size="sm" 
                 onClick={() => setShowAddModuleModal(true)}
@@ -344,7 +357,8 @@ export default function ProjectDetailPage() {
                 <Plus className="w-4 h-4 mr-1" />
                 Add Module
               </Button>
-              <Link href={`/modules?project=${projectId}`}>
+              )}
+              <Link href={`/modules?project=${project.id}`}>
                 <Button size="sm" variant="outline">View All</Button>
               </Link>
             </div>
@@ -389,20 +403,20 @@ export default function ProjectDetailPage() {
                           <td className="px-3 py-2">{taskCount || 0}</td>
                           <td className="px-3 py-2">{estimatedTime || 0}h</td>
                           <td className="px-3 py-2">
-                            <div className="flex items-center justify-end gap-2">
-                              <Link href={`/projects/${projectId}/modules/${module.id}`}>
+                            <div className="flex items-center justify-end">
+                              <Link
+                                href={projectModuleHref(
+                                  project,
+                                  module,
+                                  projectSummaries,
+                                  modules,
+                                )}
+                              >
                                 <Button size="sm" variant="outline">
                                   <Eye className="w-4 h-4 mr-1" />
                                   View
                                 </Button>
                               </Link>
-                              <Button
-                                size="sm"
-                                variant={enabled ? 'secondary' : 'default'}
-                                onClick={() => handleToggleModuleActive(module.id, enabled)}
-                              >
-                                Toggle
-                              </Button>
                             </div>
                           </td>
                         </tr>

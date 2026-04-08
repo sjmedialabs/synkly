@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAdminClient, getAuthContext } from '@/lib/rbac-server'
+import { normalizeRole } from '@/lib/rbac'
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const isMissingClientsTable = (error: any) =>
+  error?.code === 'PGRST205' || String(error?.message || '').includes("Could not find the table 'public.clients'")
 
 // GET /api/clients - List all clients (master admin only)
 export async function GET() {
@@ -9,29 +12,76 @@ export async function GET() {
     const ctx = await getAuthContext()
     if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+    const adminClient = getAdminClient()
+
     // Only master admin can list all clients
     if (!ctx.isMasterAdmin) {
       // Client admin can only see their own client
       if (ctx.isClientAdmin && ctx.clientId) {
-        const adminClient = getAdminClient()
         const { data, error } = await adminClient
           .from('clients')
           .select('id, name, email, company, phone, address, is_active, created_at')
           .eq('id', ctx.clientId)
           .single()
-        
+
+        if (isMissingClientsTable(error)) {
+          return NextResponse.json({
+            clients: [
+              {
+                id: ctx.clientId,
+                name: 'My Organization',
+                email: ctx.email,
+                company: null,
+                phone: null,
+                address: null,
+                is_active: true,
+                created_at: new Date().toISOString(),
+              },
+            ],
+            warning: 'Using fallback because public.clients is not available',
+          })
+        }
         if (error) return NextResponse.json({ error: error.message }, { status: 500 })
         return NextResponse.json({ clients: [data] })
       }
       return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
     }
 
-    const adminClient = getAdminClient()
     const { data, error } = await adminClient
       .from('clients')
       .select('id, name, email, company, phone, address, is_active, created_at')
       .order('name', { ascending: true })
 
+    if (isMissingClientsTable(error)) {
+      const { data: authUsers, error: authError } = await adminClient.auth.admin.listUsers({
+        page: 1,
+        perPage: 1000,
+      })
+      if (authError) return NextResponse.json({ error: authError.message }, { status: 500 })
+
+      const fallbackClients = (authUsers?.users || [])
+        .filter((u: any) => normalizeRole(u.user_metadata?.role) === 'client_admin')
+        .map((u: any) => {
+          const inferredId = u.user_metadata?.client_id || u.id
+          const inferredName =
+            (u.user_metadata?.organization_name as string | undefined) ||
+            `${u.user_metadata?.full_name || (u.email || '').split('@')[0] || 'Client'} Organization`
+          return {
+            id: inferredId,
+            name: inferredName,
+            email: u.email || null,
+            company: inferredName,
+            phone: null,
+            address: null,
+            is_active: true,
+            created_at: u.created_at || new Date().toISOString(),
+          }
+        })
+      return NextResponse.json({
+        clients: fallbackClients,
+        warning: 'Using auth fallback because public.clients is not available',
+      })
+    }
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     return NextResponse.json({ clients: data || [] })
   } catch (err: any) {
@@ -67,6 +117,16 @@ export async function POST(request: NextRequest) {
     }
 
     const adminClient = getAdminClient()
+    const clientsProbe = await adminClient.from('clients').select('id').limit(1)
+    if (isMissingClientsTable(clientsProbe.error)) {
+      return NextResponse.json(
+        {
+          error:
+            "Missing required table public.clients. Run migration/script to create clients table before creating clients from UI.",
+        },
+        { status: 500 },
+      )
+    }
 
     // Create client
     const { data: clientData, error: clientError } = await adminClient
@@ -127,7 +187,7 @@ export async function POST(request: NextRequest) {
 
     // Create/update user profile with client_id and role
     const { data: userData, error: userError } = await adminClient
-      .from('users')
+      .from('team')
       .upsert(
         {
           id: clientAdminId,

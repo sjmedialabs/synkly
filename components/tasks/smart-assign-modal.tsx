@@ -17,7 +17,8 @@ type Recommendation = {
 
 type Sprint = {
   id: string
-  sprint_name: string
+  sprint_name?: string
+  name?: string
   start_date: string | null
   end_date: string | null
   status: string
@@ -100,7 +101,7 @@ export function SmartAssignModal({ task, onClose, onAssign }: SmartAssignModalPr
       console.log('[v0] Sprints response:', {
         statusOk: response.ok,
         count: data.sprints?.length || 0,
-        sprints: data.sprints?.map((s: any) => s.sprint_name) || []
+        sprints: data.sprints?.map((s: any) => s.name || s.sprint_name) || []
       })
 
       const sprintList: Sprint[] = data.sprints || []
@@ -150,9 +151,10 @@ export function SmartAssignModal({ task, onClose, onAssign }: SmartAssignModalPr
   }
 
   const formatSprintLabel = (sprint: Sprint) => {
+    const sprintTitle = sprint.name || sprint.sprint_name || 'Sprint'
     const start = sprint.start_date ? new Date(sprint.start_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''
     const end = sprint.end_date ? new Date(sprint.end_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''
-    return `${sprint.sprint_name}${start && end ? ` (${start} – ${end})` : ''}`
+    return `${sprintTitle}${start && end ? ` (${start} – ${end})` : ''}`
   }
 
   return (

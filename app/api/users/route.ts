@@ -13,7 +13,7 @@ export async function GET() {
     
     // Build query with client filtering
     let query = adminClient
-      .from('users')
+      .from('team')
       .select(`
         id,
         email,
@@ -112,7 +112,7 @@ export async function POST(request: NextRequest) {
     
     // Update the user profile (trigger should have created it)
     const { data: userData, error: updateError } = await adminClient
-      .from('users')
+      .from('team')
       .upsert({
         id: authData.user.id,
         email,

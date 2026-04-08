@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
-import { canAccessAll, getAuthContext } from '@/lib/rbac-server'
+import { canMutateMasterData, getAuthContext } from '@/lib/rbac-server'
 
 function getAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -8,6 +8,54 @@ function getAdminClient() {
   return createClient(supabaseUrl, supabaseServiceKey, {
     auth: { autoRefreshToken: false, persistSession: false }
   })
+}
+
+async function resolveOrCreateTypeId(
+  adminClient: ReturnType<typeof getAdminClient>,
+  typeName: string,
+  allowCreate: boolean,
+): Promise<string | null> {
+  const normalized = String(typeName || '').trim().toLowerCase()
+  if (!normalized) return null
+
+  const byExact = await adminClient
+    .from('master_data_types')
+    .select('id, name')
+    .eq('name', normalized)
+    .maybeSingle()
+  if (!byExact.error && byExact.data?.id) return byExact.data.id
+
+  const byIlike = await adminClient
+    .from('master_data_types')
+    .select('id, name')
+    .ilike('name', normalized)
+    .limit(1)
+  if (!byIlike.error && byIlike.data && byIlike.data.length > 0) {
+    return byIlike.data[0].id
+  }
+
+  if (!allowCreate) return null
+
+  const created = await adminClient
+    .from('master_data_types')
+    .insert({ name: normalized } as any)
+    .select('id')
+    .single()
+  if (!created.error && created.data?.id) return created.data.id
+
+  // Concurrent request may have created the row after our initial read.
+  if (created.error?.code === '23505') {
+    const retry = await adminClient
+      .from('master_data_types')
+      .select('id, name')
+      .ilike('name', normalized)
+      .limit(1)
+    if (!retry.error && retry.data && retry.data.length > 0) {
+      return retry.data[0].id
+    }
+  }
+
+  return null
 }
 
 export async function GET(request: NextRequest) {
@@ -26,22 +74,45 @@ export async function GET(request: NextRequest) {
     
     const adminClient = getAdminClient()
     
-    // Get type ID from name
-    const { data: typeData, error: typeError } = await adminClient
-      .from('master_data_types')
-      .select('id')
-      .eq('name', typeParam)
-      .single()
-    
-    if (typeError || !typeData) {
-      return NextResponse.json({ error: 'Type not found' }, { status: 404 })
+    const typeId = await resolveOrCreateTypeId(adminClient, typeParam, false)
+    if (!typeId) {
+      // Legacy fallback for installations using master_departments/master_designations only.
+      if (typeParam === 'department') {
+        const legacyDeptRes = await adminClient
+          .from('master_departments')
+          .select('id, name, is_active')
+          .eq('is_active', true)
+          .order('name', { ascending: true })
+        if (legacyDeptRes.error) return NextResponse.json({ values: [] })
+        const values = (legacyDeptRes.data || []).map((row: any) => ({
+          ...row,
+          parent_id: null,
+          tenant_id: null,
+        }))
+        return NextResponse.json({ values })
+      }
+      if (typeParam === 'designation') {
+        const legacyDesigRes = await adminClient
+          .from('master_designations')
+          .select('id, name, is_active')
+          .eq('is_active', true)
+          .order('name', { ascending: true })
+        if (legacyDesigRes.error) return NextResponse.json({ values: [] })
+        const values = (legacyDesigRes.data || []).map((row: any) => ({
+          ...row,
+          parent_id: null,
+          tenant_id: null,
+        }))
+        return NextResponse.json({ values })
+      }
+      return NextResponse.json({ values: [] })
     }
     
     // Try modern schema first (parent_id + tenant_id)
     let modernQuery = adminClient
       .from('master_data_values')
       .select('id, name, is_active, parent_id, tenant_id')
-      .eq('type_id', typeData.id)
+      .eq('type_id', typeId)
       .eq('is_active', true)
       .order('name', { ascending: true })
 
@@ -64,7 +135,7 @@ export async function GET(request: NextRequest) {
     const legacyRes = await adminClient
       .from('master_data_values')
       .select('id, name, is_active')
-      .eq('type_id', typeData.id)
+      .eq('type_id', typeId)
       .eq('is_active', true)
       .order('name', { ascending: true })
 
@@ -90,7 +161,7 @@ export async function POST(request: NextRequest) {
   try {
     const ctx = await getAuthContext()
     if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    if (!canAccessAll(ctx.role)) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    if (!canMutateMasterData(ctx.role)) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
 
     const body = await request.json()
     const { type, name, parent_id, tenant_id } = body
@@ -101,15 +172,15 @@ export async function POST(request: NextRequest) {
     
     const adminClient = getAdminClient()
     
-    // Get type ID
-    const { data: typeData, error: typeError } = await adminClient
-      .from('master_data_types')
-      .select('id')
-      .eq('name', type)
-      .single()
-    
-    if (typeError || !typeData) {
-      return NextResponse.json({ error: 'Type not found' }, { status: 404 })
+    const typeId = await resolveOrCreateTypeId(adminClient, type, true)
+    if (!typeId) {
+      return NextResponse.json(
+        {
+          error:
+            'Master data type could not be resolved in modern schema. Please ensure `master_data_types` exists and contains department/designation rows.',
+        },
+        { status: 500 },
+      )
     }
     
     // 1) If global already exists (case-insensitive), return it
@@ -120,7 +191,7 @@ export async function POST(request: NextRequest) {
     let globalExistsQuery = adminClient
       .from('master_data_values')
       .select('id, name, type_id, parent_id, tenant_id, is_active')
-      .eq('type_id', typeData.id)
+      .eq('type_id', typeId)
       .is('tenant_id', null)
       .eq('is_active', true)
 
@@ -136,7 +207,7 @@ export async function POST(request: NextRequest) {
       const legacyExists = await adminClient
         .from('master_data_values')
         .select('id, name, type_id, is_active')
-        .eq('type_id', typeData.id)
+        .eq('type_id', typeId)
         .eq('is_active', true)
 
       if (legacyExists.error) {
@@ -158,14 +229,14 @@ export async function POST(request: NextRequest) {
     // 2) Create global value
     const insertPayload = modernSchema
       ? {
-          type_id: typeData.id,
+          type_id: typeId,
           name: normalizedName,
           parent_id: parent_id || null,
           tenant_id: null,
           is_active: true,
         }
       : {
-          type_id: typeData.id,
+          type_id: typeId,
           name: normalizedName,
           is_active: true,
         }
@@ -185,7 +256,7 @@ export async function POST(request: NextRequest) {
       let tenantExistsQuery = adminClient
         .from('master_data_values')
         .select('id, name')
-        .eq('type_id', typeData.id)
+        .eq('type_id', typeId)
         .eq('tenant_id', tenant_id)
         .eq('is_active', true)
 
@@ -202,7 +273,7 @@ export async function POST(request: NextRequest) {
 
       if (!tenantMatch) {
         await adminClient.from('master_data_values').insert({
-          type_id: typeData.id,
+          type_id: typeId,
           name: normalizedName,
           parent_id: parent_id || null,
           tenant_id,
@@ -222,7 +293,7 @@ export async function DELETE(request: NextRequest) {
   try {
     const ctx = await getAuthContext()
     if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    if (!canAccessAll(ctx.role)) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    if (!canMutateMasterData(ctx.role)) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
 
     const { searchParams } = new URL(request.url)
     const id = searchParams.get('id')
@@ -232,16 +303,26 @@ export async function DELETE(request: NextRequest) {
     }
 
     const adminClient = getAdminClient()
-    const { error } = await adminClient
-      .from('master_data_values')
-      .delete()
-      .eq('id', id)
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 })
-    }
+    const del = async (table: string) =>
+      adminClient.from(table).delete().eq('id', id).select('id')
 
-    return NextResponse.json({ success: true })
+    const md = await del('master_data_values')
+    if (md.error) return NextResponse.json({ error: md.error.message }, { status: 500 })
+    if (md.data && md.data.length > 0) return NextResponse.json({ success: true })
+
+    const dept = await del('master_departments')
+    if (dept.error) return NextResponse.json({ error: dept.error.message }, { status: 500 })
+    if (dept.data && dept.data.length > 0) return NextResponse.json({ success: true })
+
+    const desig = await del('master_designations')
+    if (desig.error) return NextResponse.json({ error: desig.error.message }, { status: 500 })
+    if (desig.data && desig.data.length > 0) return NextResponse.json({ success: true })
+
+    return NextResponse.json(
+      { error: 'Could not delete this value (not found or blocked by database rules).' },
+      { status: 404 },
+    )
   } catch (err: unknown) {
     console.error('[master-data values API] DELETE error:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })

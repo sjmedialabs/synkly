@@ -1,39 +1,158 @@
-import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
-import { hasPermission, isFullAccessRole, resolveRole } from '@/lib/rbac'
+import { resolveAssignmentPersonRole } from '@/lib/people-for-assignment'
+import { isAssignableTaskRole } from '@/lib/rbac'
+import { can, canAccessAll, getAuthContext } from '@/lib/rbac-server'
 
 const RESTRICTED_DESIGNATIONS = ['Super Admin', 'Delivery Manager']
 
+function isMissingTable(err: { code?: string; message?: string } | null | undefined, tableHint: string) {
+  if (!err) return false
+  if (err.code === 'PGRST205') return true
+  const m = String(err.message || '').toLowerCase()
+  return m.includes(`public.${tableHint}`) || m.includes('could not find the table')
+}
+
+/** Confirm assignee exists (team → users → Auth). Optional designation for restricted-title checks. */
+async function fetchAssigneeForValidation(
+  supabase: any,
+  assigneeId: string,
+): Promise<{ found: true; designation: string | null } | { found: false }> {
+  const fromTeam = await supabase.from('team').select('id, designation').eq('id', assigneeId).maybeSingle()
+  if (fromTeam.data?.id) {
+    return { found: true, designation: (fromTeam.data.designation as string | null) ?? null }
+  }
+  if (fromTeam.error && !isMissingTable(fromTeam.error, 'team')) {
+    console.error('[task assign] team assignee lookup error:', fromTeam.error)
+    return { found: false }
+  }
+
+  const userSelects = ['id, designation', 'id, full_name, designation', 'id']
+  for (const cols of userSelects) {
+    const fromUsers = await supabase.from('users').select(cols).eq('id', assigneeId).maybeSingle()
+    if (fromUsers.error) {
+      if (isMissingTable(fromUsers.error, 'users')) break
+      if (fromUsers.error.code === 'PGRST204') continue
+      continue
+    }
+    if (fromUsers.data && (fromUsers.data as { id: string }).id) {
+      const designation = (fromUsers.data as { designation?: string | null }).designation ?? null
+      return { found: true, designation }
+    }
+  }
+
+  try {
+    const { data } = await supabase.auth.admin.getUserById(assigneeId)
+    if (data?.user?.id) return { found: true, designation: null }
+  } catch {
+    /* ignore */
+  }
+
+  return { found: false }
+}
+
+/** When `team` / `users` are missing, allow Team Lead to assign if assignee exists in Auth (degraded). */
+async function verifyTeamLeadCanAssignTo(
+  supabase: any,
+  authUserId: string,
+  assigneeId: string,
+): Promise<boolean> {
+  const fromTeam = await supabase
+    .from('team')
+    .select('id')
+    .eq('id', assigneeId)
+    .eq('reporting_manager_id', authUserId)
+    .maybeSingle()
+
+  if (fromTeam.data?.id) return true
+  if (fromTeam.error && !isMissingTable(fromTeam.error, 'team')) {
+    console.warn('[task assign] team_lead team check:', fromTeam.error)
+  }
+
+  const teamUnavailable = !!(fromTeam.error && isMissingTable(fromTeam.error, 'team'))
+  const shouldTryUsers = teamUnavailable || (!fromTeam.error && !fromTeam.data)
+
+  if (!shouldTryUsers) return false
+
+  const fromUsers = await supabase
+    .from('users')
+    .select('id')
+    .eq('id', assigneeId)
+    .eq('reporting_manager_id', authUserId)
+    .maybeSingle()
+
+  if (fromUsers.data?.id) return true
+  if (fromUsers.error && !isMissingTable(fromUsers.error, 'users')) {
+    console.warn('[task assign] team_lead users check:', fromUsers.error)
+  }
+
+  const usersUnavailable = !!(fromUsers.error && isMissingTable(fromUsers.error, 'users'))
+  if (teamUnavailable && usersUnavailable) {
+    try {
+      const { data } = await supabase.auth.admin.getUserById(assigneeId)
+      return !!data?.user?.id
+    } catch {
+      return false
+    }
+  }
+
+  return false
+}
+
+function stripTasksUpdateColumnFromError(
+  err: { code?: string; message?: string },
+  payload: Record<string, unknown>,
+  estimatedHours: number | undefined,
+): boolean {
+  if (err.code !== 'PGRST204') return false
+  const msg = String(err.message || '')
+  if (msg.includes('assigned_month') && 'assigned_month' in payload) {
+    delete payload.assigned_month
+    return true
+  }
+  if (msg.includes('carried_from_sprint_id') && 'carried_from_sprint_id' in payload) {
+    delete payload.carried_from_sprint_id
+    return true
+  }
+  if (msg.includes('estimated_hours') && 'estimated_hours' in payload) {
+    delete payload.estimated_hours
+    if (estimatedHours !== undefined) payload.estimation = estimatedHours
+    return true
+  }
+  if (msg.includes('estimation') && 'estimation' in payload) {
+    delete payload.estimation
+    return true
+  }
+  return false
+}
+
 export async function POST(request: NextRequest) {
-  const supabase = await createClient()
+  const ctx = await getAuthContext()
   
   try {
-    const {
-      data: { user: authUser },
-    } = await supabase.auth.getUser()
-    if (!authUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-    const roleRes = await supabase
-      .from('users')
-      .select('id, role, designation')
-      .eq('id', authUser.id)
-      .single()
-    const actorRole = resolveRole(roleRes.data)
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    const supabase = ctx.adminClient
+    const actorRole = ctx.role
+    const authUserId = ctx.userId
 
     const body = await request.json()
-    const { taskId, assigneeId, estimatedHours, month, sprintId } = body
-    if (!isFullAccessRole(actorRole) && !hasPermission(actorRole, 'ASSIGN_TASK')) {
+    const taskId = String(body.taskId ?? body.task_id ?? '').trim()
+    const assigneeIdRaw = body.assigneeId ?? body.assignee_id
+    const assigneeId =
+      assigneeIdRaw === null || assigneeIdRaw === undefined || assigneeIdRaw === ''
+        ? ''
+        : String(assigneeIdRaw).trim()
+    const sprintId = String(body.sprintId ?? body.sprint_id ?? '').trim()
+    const estimatedHoursRaw = body.estimatedHours ?? body.estimated_hours
+    const estimatedHours =
+      estimatedHoursRaw === undefined || estimatedHoursRaw === '' ? undefined : Number(estimatedHoursRaw)
+    const month = body.month != null && body.month !== '' ? String(body.month) : undefined
+    if (!canAccessAll(actorRole) && !can(actorRole, 'ASSIGN_TASK')) {
       return NextResponse.json({ error: 'Not allowed to assign tasks' }, { status: 403 })
     }
 
     if (actorRole === 'team_lead' && assigneeId) {
-      const teamMemberRes = await supabase
-        .from('users')
-        .select('id')
-        .eq('id', assigneeId)
-        .eq('reporting_manager_id', authUser.id)
-        .single()
-      if (teamMemberRes.error || !teamMemberRes.data) {
+      const ok = await verifyTeamLeadCanAssignTo(supabase, authUserId, assigneeId)
+      if (!ok) {
         return NextResponse.json({ error: 'Team Lead can assign only to their team members' }, { status: 403 })
       }
     }
@@ -49,141 +168,162 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Sprint selection is required' }, { status: 400 })
     }
 
-    // Validate sprint exists in sprint_tracking table
-    console.log('[v0 task assign] Checking sprint exists:', sprintId, 'type:', typeof sprintId)
-    
-    // Get all sprints for debugging
-    const { data: allSprints, error: allSprintsError } = await supabase
-      .from('sprint_tracking')
-      .select('id, sprint_name, project_id')
-      .limit(10)
-    
-    console.log('[v0 task assign] ALL sprints in db:', allSprints?.length || 0, 'error:', allSprintsError?.message)
+    // Load task with * so missing optional columns (e.g. assigned_month) do not break the query.
+    const taskLookup = await supabase.from('tasks').select('*').eq('id', taskId).maybeSingle()
 
-    // If no sprints exist, create sample sprints
-    if (!allSprints || allSprints.length === 0) {
-      console.log('[v0 task assign] No sprints found, creating sample sprints')
-      
-      // Get the project for the task
-      const { data: task } = await supabase
-        .from('tasks')
-        .select('project_id')
-        .eq('id', taskId)
-        .single()
-      
-      if (task) {
-        const sprints = [
-          {
-            project_id: task.project_id,
-            sprint_name: 'Sprint 1 (Apr 1 - Apr 17)',
-            start_date: new Date('2026-04-01').toISOString(),
-            end_date: new Date('2026-04-17').toISOString(),
-            status: 'active'
-          },
-          {
-            project_id: task.project_id,
-            sprint_name: 'Sprint 2 (Apr 6 - Apr 20)',
-            start_date: new Date('2026-04-06').toISOString(),
-            end_date: new Date('2026-04-20').toISOString(),
-            status: 'active'
-          }
-        ]
-        
-        await supabase.from('sprint_tracking').insert(sprints)
-        
-        // Re-fetch sprints
-        const { data: newSprints } = await supabase
-          .from('sprint_tracking')
-          .select('id, sprint_name')
-          .eq('project_id', task.project_id)
-        
-        console.log('[v0 task assign] Created new sprints:', newSprints?.length)
-      }
+    if (taskLookup.error) {
+      console.error('[v0 task assign] Task lookup error:', taskLookup.error.message, taskLookup.error.code)
+      return NextResponse.json(
+        { error: 'Task lookup failed', details: taskLookup.error.message },
+        { status: 400 },
+      )
     }
-    
-    // Look up the sprint
-    const { data: sprint, error: sprintError } = await supabase
-      .from('sprint_tracking')
-      .select('id, sprint_name')
-      .eq('id', sprintId)
-      .single()
 
-    console.log('[v0 task assign] Sprint lookup result:', { sprint, error: sprintError?.message, code: sprintError?.code })
+    const row = taskLookup.data as Record<string, unknown> | null
+    if (!row) {
+      return NextResponse.json({ error: 'Task not found' }, { status: 400 })
+    }
 
-    if (sprintError || !sprint) {
-      console.error('[v0 task assign] Sprint not found:', sprintId)
+    let taskProjectId = (row.project_id as string | null | undefined) ?? null
+    const moduleId = row.module_id as string | null | undefined
+    if (!taskProjectId && moduleId) {
+      const { data: moduleRow } = await supabase
+        .from('modules')
+        .select('project_id')
+        .eq('id', moduleId)
+        .maybeSingle()
+      taskProjectId = (moduleRow?.project_id as string | undefined) || null
+    }
+
+    console.log('[v0 task assign] Resolving sprint:', sprintId, 'for project:', taskProjectId ?? '(unknown)')
+
+    let sprint: { id: string; project_id?: string } | null = null
+
+    const resolveSprintScoped = async (pid: string) => {
+      const fromSprints = await supabase
+        .from('sprints')
+        .select('id, project_id')
+        .eq('id', sprintId)
+        .eq('project_id', pid)
+        .maybeSingle()
+      if (!fromSprints.error && fromSprints.data?.id) {
+        return { id: fromSprints.data.id as string, project_id: fromSprints.data.project_id as string }
+      }
+      const fromTracking = await supabase
+        .from('sprint_tracking')
+        .select('id, project_id')
+        .eq('id', sprintId)
+        .eq('project_id', pid)
+        .maybeSingle()
+      if (!fromTracking.error && fromTracking.data?.id) {
+        return { id: fromTracking.data.id as string, project_id: fromTracking.data.project_id as string }
+      }
+      return null
+    }
+
+    const resolveSprintByIdOnly = async () => {
+      const wideSprints = await supabase.from('sprints').select('id, project_id').eq('id', sprintId).maybeSingle()
+      if (!wideSprints.error && wideSprints.data?.id) {
+        return { id: wideSprints.data.id as string, project_id: wideSprints.data.project_id as string }
+      }
+      const wideTracking = await supabase
+        .from('sprint_tracking')
+        .select('id, project_id')
+        .eq('id', sprintId)
+        .maybeSingle()
+      if (!wideTracking.error && wideTracking.data?.id) {
+        return { id: wideTracking.data.id as string, project_id: wideTracking.data.project_id as string }
+      }
+      return null
+    }
+
+    if (taskProjectId) {
+      sprint = await resolveSprintScoped(taskProjectId)
+    } else {
+      sprint = await resolveSprintByIdOnly()
+    }
+
+    if (!sprint) {
+      console.error('[v0 task assign] Sprint not found in sprints or sprint_tracking:', sprintId)
       return NextResponse.json({ error: 'Selected sprint is not available. Please refresh the page and try again.' }, { status: 400 })
     }
 
-    // CRITICAL: Validate assignee designation before allowing assignment
+    if (taskProjectId && sprint.project_id && sprint.project_id !== taskProjectId) {
+      console.error('[v0 task assign] Sprint project mismatch', { taskProjectId, sprintProject: sprint.project_id })
+      return NextResponse.json({ error: 'Selected sprint does not belong to this task’s project.' }, { status: 400 })
+    }
+
+    if (!taskProjectId && !sprint.project_id) {
+      console.error('[v0 task assign] Missing project context for task:', taskId)
+      return NextResponse.json({ error: 'Task project is missing' }, { status: 400 })
+    }
+
+    // Validate assignee exists (team → users → Auth), role, and restricted titles
     if (assigneeId) {
       console.log('[task assign] Validating assignee:', assigneeId)
 
-      // Check if assignee exists and has restricted designation (users table with TEXT designation)
-      const { data: assignee, error: assigneeError } = await supabase
-        .from('users')
-        .select('id, full_name, designation')
-        .eq('id', assigneeId)
-        .single()
-
-      if (assigneeError) {
-        console.error('[task assign] Assignee not found:', assigneeError)
-        return NextResponse.json({ error: 'User not found' }, { status: 404 })
+      const assignee = await fetchAssigneeForValidation(supabase, assigneeId)
+      if (!assignee.found) {
+        console.error('[task assign] Assignee not found in team, users, or Auth')
+        return NextResponse.json({ error: 'User not found' }, { status: 400 })
       }
 
-      // Check if user has restricted designation
-      if (assignee?.designation && RESTRICTED_DESIGNATIONS.includes(assignee.designation)) {
+      const resolvedRole = await resolveAssignmentPersonRole(supabase, assigneeId)
+      if (!isAssignableTaskRole(resolvedRole)) {
+        return NextResponse.json(
+          {
+            error:
+              'Tasks can only be assigned to team leads and team members (not managers or administrators).',
+          },
+          { status: 403 },
+        )
+      }
+
+      if (assignee.designation && RESTRICTED_DESIGNATIONS.includes(assignee.designation)) {
         console.log('[task assign] Blocked assignment - user has restricted designation:', assignee.designation)
         return NextResponse.json(
-          { 
+          {
             error: `Tasks cannot be assigned to ${assignee.designation}. This role cannot receive task assignments.`,
-            restrictedDesignation: assignee.designation
+            restrictedDesignation: assignee.designation,
           },
-          { status: 403 }
+          { status: 403 },
         )
       }
     }
 
-    // Get current task to check if there's an existing assignee and sprint
-    const { data: currentTask, error: taskError } = await supabase
-      .from('tasks')
-      .select('assignee_id, estimated_hours, assigned_month, sprint_id')
-      .eq('id', taskId)
-      .single()
+    const prevAssigneeId = row.assignee_id as string | null | undefined
+    const prevEstimated =
+      row.estimated_hours != null
+        ? Number(row.estimated_hours)
+        : row.estimation != null
+          ? Number(row.estimation)
+          : null
+    const prevAssignedMonth = row.assigned_month as string | null | undefined
+    const prevSprintId = row.sprint_id as string | null | undefined
 
-    if (taskError) {
-      return NextResponse.json({ error: taskError.message }, { status: 500 })
-    }
-
-    // If there was a previous assignee, restore their capacity
-    if (currentTask?.assignee_id && currentTask?.estimated_hours && currentTask?.assigned_month) {
+    // If there was a previous assignee, restore their capacity (only when schema has these fields)
+    if (prevAssigneeId && prevEstimated != null && Number.isFinite(prevEstimated) && prevAssignedMonth) {
       await supabase.rpc('restore_capacity', {
-        p_employee_id: currentTask.assignee_id,
-        p_month: currentTask.assigned_month,
-        p_hours: currentTask.estimated_hours
+        p_employee_id: prevAssigneeId,
+        p_month: prevAssignedMonth,
+        p_hours: prevEstimated,
       })
     }
 
     // Handle carry-forward tracking if sprint is changing
     let carriedFromSprintId = null
-    if (currentTask?.sprint_id && currentTask.sprint_id !== sprintId) {
-      // Only mark as carried if task is not completed
-      const { data: taskStatus } = await supabase
-        .from('tasks')
-        .select('status')
-        .eq('id', taskId)
-        .single()
-
+    if (prevSprintId && prevSprintId !== sprintId) {
+      const { data: taskStatus } = await supabase.from('tasks').select('status').eq('id', taskId).maybeSingle()
       if (taskStatus?.status !== 'done') {
-        carriedFromSprintId = currentTask.sprint_id
+        carriedFromSprintId = prevSprintId
       }
     }
 
     // Update the task with new assignee and sprint
-    // IMPORTANT: Only set sprint_id if it's a valid UUID from sprint_tracking
+    // IMPORTANT: Only set sprint_id after validation against `sprints` or `sprint_tracking`
     const updateData: Record<string, unknown> = {
       assignee_id: assigneeId || null,
-      assigned_month: assigneeId ? (month || new Date().toISOString().slice(0, 7)) : null,
+      assigned_month: assigneeId ? month || new Date().toISOString().slice(0, 7) : null,
     }
 
     // Only add sprint_id if it was validated to exist
@@ -203,12 +343,20 @@ export async function POST(request: NextRequest) {
 
     console.log('[v0 task assign] Final update data:', updateData)
 
-    let { data: updatedTask, error: updateError } = await supabase
-      .from('tasks')
-      .update(updateData)
-      .eq('id', taskId)
-      .select()
-      .single()
+    let updatedTask: any = null
+    let updateError: any = null
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const res = await supabase.from('tasks').update(updateData).eq('id', taskId).select().single()
+      updatedTask = res.data
+      updateError = res.error
+      if (!updateError) break
+      if (stripTasksUpdateColumnFromError(updateError, updateData, estimatedHours)) {
+        console.warn('[v0 task assign] Retrying update without unknown column:', updateError.message)
+        continue
+      }
+      break
+    }
+
     let sprintAssignmentSkipped = false
 
     // Some environments still have a legacy sprint FK target; keep assignment working even if sprint cannot be written.

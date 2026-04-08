@@ -2,6 +2,7 @@ import { createClient as createServerClient } from '@/lib/supabase/server'
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
 import { ROLE_LABELS, ROLE_PERMISSIONS, resolveRole, type RoleKey } from '@/lib/rbac'
+import { getAuthContext } from '@/lib/rbac-server'
 
 function getAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -16,24 +17,77 @@ function getAdminClient() {
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
+async function resolvePeopleTable(
+  adminClient: ReturnType<typeof getAdminClient>,
+): Promise<'team' | 'users' | null> {
+  const teamCheck = await adminClient.from('team').select('id').limit(1)
+  if (!teamCheck.error) return 'team'
+  const usersCheck = await adminClient.from('users').select('id').limit(1)
+  if (!usersCheck.error) return 'users'
+  return null
+}
+
 export async function GET() {
   try {
     const adminClient = getAdminClient()
-    const modernRes = await adminClient
-      .from('users')
-      .select('id, email, full_name, role, designation, is_active, created_at')
-      .order('created_at', { ascending: false })
+    const peopleTable = await resolvePeopleTable(adminClient)
+    if (!peopleTable) {
+      const { data, error } = await adminClient.auth.admin.listUsers({ page: 1, perPage: 1000 })
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      const users = (data?.users || []).map((u: any) => ({
+        id: u.id,
+        email: u.email || '',
+        full_name: u.user_metadata?.full_name || null,
+        name: u.user_metadata?.full_name || null,
+        role: resolveRole({ role: u.user_metadata?.role, designation: u.user_metadata?.designation }),
+        department_name: u.user_metadata?.department || null,
+        designation_name: u.user_metadata?.designation || null,
+        reporting_manager_id: u.user_metadata?.reporting_manager_id || null,
+        experience_years: Number(u.user_metadata?.experience_years || 0) || null,
+        skillset: Array.isArray(u.user_metadata?.skills) ? u.user_metadata.skills : [],
+        is_active: u.user_metadata?.is_active !== false,
+        created_at: u.created_at || new Date().toISOString(),
+      }))
+      return NextResponse.json({ users })
+    }
+    const attempts = [
+      () =>
+        adminClient
+          .from(peopleTable)
+          .select('id, email, full_name, role, designation, is_active, created_at, roles(name)')
+          .order('created_at', { ascending: false }),
+      () =>
+        adminClient
+          .from(peopleTable)
+          .select('id, email, full_name, designation, is_active, created_at, roles(name)')
+          .order('created_at', { ascending: false }),
+      () =>
+        adminClient
+          .from(peopleTable)
+          .select('id, email, full_name, role, designation, is_active, created_at')
+          .order('created_at', { ascending: false }),
+      () =>
+        adminClient
+          .from(peopleTable)
+          .select('id, email, full_name, designation, is_active, created_at')
+          .order('created_at', { ascending: false }),
+      () =>
+        adminClient
+          .from(peopleTable)
+          .select('*')
+          .order('created_at', { ascending: false }),
+    ] as const
 
-    let users = modernRes.data as any[] | null
-    let error = modernRes.error
-
-    if (error) {
-      const legacyRes = await adminClient
-        .from('users')
-        .select('id, email, full_name, designation, is_active, created_at')
-        .order('created_at', { ascending: false })
-      users = legacyRes.data as any[] | null
-      error = legacyRes.error
+    let users: any[] | null = null
+    let error: { message: string } | null = null
+    for (const run of attempts) {
+      const res = await run()
+      if (!res.error) {
+        users = res.data as any[] | null
+        error = null
+        break
+      }
+      error = res.error
     }
 
     if (error) {
@@ -44,7 +98,7 @@ export async function GET() {
       const canonicalRole = resolveRole(user)
       return {
         ...user,
-        name: user.full_name || null,
+        name: user.full_name || user.name || null,
         role: canonicalRole,
         role_label: canonicalRole ? ROLE_LABELS[canonicalRole] : null,
         permissions: canonicalRole ? ROLE_PERMISSIONS[canonicalRole] : [],
@@ -60,36 +114,27 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    const serverClient = await createServerClient()
+    const ctx = await getAuthContext()
     const adminClient = getAdminClient()
-    const {
-      data: { user: sessionUser },
-    } = await serverClient.auth.getUser()
+    const peopleTable = await resolvePeopleTable(adminClient)
+    const sessionUser = ctx.userId ? { id: ctx.userId } : null
 
     if (!sessionUser) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const currentUserModern = await adminClient
-      .from('users')
-      .select('role')
-      .eq('id', sessionUser.id)
-      .single()
-    let currentUserData: any = currentUserModern.data
-    if (currentUserModern.error) {
-      const currentUserLegacy = await adminClient
-        .from('users')
-        .select('role')
-        .eq('id', sessionUser.id)
-        .single()
-      currentUserData = currentUserLegacy.data
-    }
+    const currentRole = ctx.role
+    const canCreateTeamMember = ctx.isMasterAdmin || ctx.isClientAdmin
 
-    const isSuperAdmin = resolveRole({ role: currentUserData?.role }) === 'super_admin'
-
-    if (!isSuperAdmin) {
+    if (!canCreateTeamMember) {
+      console.error('[team-members API] Role check denied create:', {
+        userId: sessionUser.id,
+        role: currentRole,
+        isMasterAdmin: ctx.isMasterAdmin,
+        isClientAdmin: ctx.isClientAdmin,
+      })
       return NextResponse.json(
-        { error: 'Only Super Admin (Client Side) can create team members' },
+        { error: 'Only Client Admin can create team members' },
         { status: 403 },
       )
     }
@@ -141,15 +186,28 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Email already exists' }, { status: 409 })
     }
 
-    const { data: existingDb } = await adminClient.from('users').select('id').eq('email', email).maybeSingle()
-    if (existingDb) {
-      return NextResponse.json({ error: 'Email already exists' }, { status: 409 })
+    if (peopleTable) {
+      const { data: existingDb } = await adminClient
+        .from(peopleTable)
+        .select('id')
+        .eq('email', email)
+        .maybeSingle()
+      if (existingDb) {
+        return NextResponse.json({ error: 'Email already exists' }, { status: 409 })
+      }
     }
 
     const redirectTo = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/set-password`
     const inviteMetadata = {
       full_name,
       role,
+      department,
+      division,
+      designation,
+      reporting_manager_id,
+      experience_years,
+      skills,
+      is_active: true,
       permissions: ROLE_PERMISSIONS[role],
       invited: true,
       invited_at: new Date().toISOString(),
@@ -236,10 +294,33 @@ export async function POST(request: NextRequest) {
       is_active: true,
       updated_at: new Date().toISOString(),
     }
+    const basePayloadNameOnly: Record<string, unknown> = {
+      ...basePayload,
+      name: full_name,
+    }
+    delete (basePayloadNameOnly as any).full_name
+
+    // If no people table is available in this environment, keep auth user creation successful
+    // and return a graceful message instead of failing with 500.
+    if (!peopleTable) {
+      return NextResponse.json(
+        {
+          user: { id: newUserId, email, full_name },
+          invitation_sent: !isDirectPasswordFlow,
+          warning:
+            'Auth user created, but no people table (public.team/public.users) is available to persist profile details.',
+          message:
+            isDirectPasswordFlow
+              ? 'Team member auth account created with password.'
+              : 'Team member auth account created and invite sent.',
+        },
+        { status: 201 },
+      )
+    }
 
     // Modern schema attempt: explicit role + division + permissions.
     let insertResult = await adminClient
-      .from('users')
+      .from(peopleTable)
       .upsert(
         {
           ...basePayload,
@@ -257,7 +338,7 @@ export async function POST(request: NextRequest) {
     // Legacy fallback if modern columns do not exist.
     if (insertResult.error) {
       insertResult = await adminClient
-        .from('users')
+        .from(peopleTable)
         .upsert(
           {
             ...basePayload,
@@ -273,7 +354,7 @@ export async function POST(request: NextRequest) {
     // Second fallback for older schemas that don't yet have users.role.
     if (insertResult.error?.code === '42703' || insertResult.error?.code === 'PGRST204') {
       insertResult = await adminClient
-        .from('users')
+        .from(peopleTable)
         .upsert(
           {
             ...basePayload,
@@ -281,6 +362,15 @@ export async function POST(request: NextRequest) {
           },
           { onConflict: 'id' },
         )
+        .select('*')
+        .single()
+    }
+
+    // Final fallback for very old schemas using `name` instead of `full_name`.
+    if (insertResult.error?.code === '42703' || insertResult.error?.code === 'PGRST204') {
+      insertResult = await adminClient
+        .from(peopleTable)
+        .upsert(basePayloadNameOnly as any, { onConflict: 'id' })
         .select('*')
         .single()
     }

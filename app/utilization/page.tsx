@@ -46,6 +46,18 @@ type ProjectBreakdown = {
   billable: boolean
 }
 
+type UtilizationTaskRow = {
+  id: string
+  estimated_hours: number
+  is_billable: boolean
+  status?: string
+  assignee_id: string | null
+  project_id?: string | null
+  assigned_month?: string | null
+  assignee: { id: string; full_name: string | null; email: string } | null
+  projects: { name: string }
+}
+
 const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899']
 
 export default function UtilizationPage() {
@@ -79,41 +91,45 @@ export default function UtilizationPage() {
         return
       }
 
-      // Fetch tasks with billable info
-      const { data: tasks } = await supabase
-        .from('tasks')
-        .select(`
-          id,
-          estimated_hours,
-          is_billable,
-          status,
-          assignee_id,
-          project_id,
-          assigned_month,
-          assignee:users!tasks_assignee_id_fkey (id, full_name, email),
-          projects (id, name)
-        `)
-        .not('assignee_id', 'is', null)
-
-      // Fetch capacity data
-      const { data: capacityData } = await supabase
-        .from('employee_capacity')
-        .select(`
-          employee_id,
-          month,
-          available_hours,
-          allocated_hours,
-          users (id, full_name, email)
-        `)
-        .eq('month', selectedMonth)
+      const res = await fetch(`/api/utilization?month=${encodeURIComponent(selectedMonth)}`, {
+        credentials: 'same-origin',
+      })
+      if (!res.ok) {
+        setLoading(false)
+        return
+      }
+      const payload = await res.json()
+      const tasks = (payload.tasks || []) as UtilizationTaskRow[]
+      const capacityData = (payload.capacityData || []) as {
+        employee_id: string
+        month: string
+        available_hours: number
+        allocated_hours: number
+        users?: { id: string; full_name: string | null; email: string }
+      }[]
 
       // Calculate utilization per employee
       const employeeMap = new Map<string, UtilizationData>()
 
-      tasks?.forEach(task => {
-        if (!task.assignee) return
-        
-        const empId = task.assignee_id
+      capacityData.forEach((cap) => {
+        const id = String(cap.employee_id)
+        if (employeeMap.has(id)) return
+        const u = cap.users
+        employeeMap.set(id, {
+          employeeId: id,
+          employeeName: u?.full_name?.trim() || u?.email?.trim() || id,
+          totalHours: 0,
+          billableHours: 0,
+          nonBillableHours: 0,
+          utilizationRate: 0,
+          projects: [],
+        })
+      })
+
+      tasks.forEach((task) => {
+        if (!task.assignee_id || !task.assignee) return
+
+        const empId = String(task.assignee_id)
         const empName = task.assignee.full_name || task.assignee.email
         
         if (!employeeMap.has(empId)) {
@@ -144,8 +160,8 @@ export default function UtilizationPage() {
       })
 
       // Calculate utilization rates based on capacity
-      capacityData?.forEach(cap => {
-        const emp = employeeMap.get(cap.employee_id)
+      capacityData.forEach((cap) => {
+        const emp = employeeMap.get(String(cap.employee_id))
         if (emp && cap.available_hours > 0) {
           emp.utilizationRate = Math.round((emp.totalHours / cap.available_hours) * 100)
         }
@@ -172,7 +188,7 @@ export default function UtilizationPage() {
         let billable = 0
         let nonBillable = 0
         
-        tasks?.forEach(task => {
+        tasks.forEach((task) => {
           if (task.assigned_month === monthKey || (!task.assigned_month && i === 0)) {
             const hours = task.estimated_hours || 0
             if (task.is_billable) {
@@ -194,7 +210,7 @@ export default function UtilizationPage() {
 
       // Project breakdown
       const projectMap = new Map<string, ProjectBreakdown>()
-      tasks?.forEach(task => {
+      tasks.forEach((task) => {
         const projName = task.projects?.name || 'Unassigned'
         if (!projectMap.has(projName)) {
           projectMap.set(projName, {
@@ -207,16 +223,7 @@ export default function UtilizationPage() {
       })
       setProjectBreakdown(Array.from(projectMap.values()).sort((a, b) => b.hours - a.hours).slice(0, 6))
 
-      // Fetch alerts
-      const { data: alertsData } = await supabase
-        .from('alerts')
-        .select('*')
-        .eq('is_read', false)
-        .eq('type', 'capacity_warning')
-        .order('created_at', { ascending: false })
-        .limit(5)
-
-      setAlerts(alertsData || [])
+      setAlerts((payload.alerts || []) as any[])
       setLoading(false)
     }
 

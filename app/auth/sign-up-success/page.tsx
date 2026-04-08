@@ -20,7 +20,7 @@ const roleConfig: Record<string, {
   bgColor: string
 }> = {
   'super-admin': {
-    name: 'Super Admin',
+    name: 'Client Admin',
     icon: Shield,
     color: 'text-red-500',
     bgColor: 'bg-red-500',

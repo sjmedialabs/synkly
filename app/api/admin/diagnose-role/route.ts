@@ -25,13 +25,13 @@ export async function GET() {
     const adminClient = getAdminClient()
 
     const byId = await adminClient
-      .from('users')
+      .from('team')
       .select('id, email, full_name, role, tenant_id')
       .eq('id', authUser.id)
       .maybeSingle()
 
     const byEmail = await adminClient
-      .from('users')
+      .from('team')
       .select('id, email, full_name, role, tenant_id')
       .eq('email', (authUser.email || '').toLowerCase())
       .maybeSingle()

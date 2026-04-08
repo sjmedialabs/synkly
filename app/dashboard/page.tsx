@@ -17,7 +17,8 @@ import {
   Clock,
   AlertCircle
 } from 'lucide-react'
-import { ROLE_LABELS, resolveRole, type RoleKey } from '@/lib/rbac'
+import { ROLE_LABELS, type RoleKey } from '@/lib/rbac'
+import { projectHref } from '@/lib/slug'
 
 interface Stats {
   projects: number
@@ -58,6 +59,7 @@ export default function DashboardPage() {
     milestones: 0,
   })
   const [recentProjects, setRecentProjects] = useState<Project[]>([])
+  const [projectLinkSummaries, setProjectLinkSummaries] = useState<{ id: string; name: string | null }[]>([])
   const [myTasks, setMyTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -69,71 +71,20 @@ export default function DashboardPage() {
         return
       }
 
-      // Fetch user details with role
-      const byIdRes = await supabase
-        .from('users')
-        .select('full_name, email, role')
-        .eq('id', user.id)
-        .maybeSingle()
-      let userData: any = byIdRes.data
-      if (!userData) {
-        const byEmailRes = await supabase
-          .from('users')
-          .select('full_name, email, role')
-          .eq('email', (user.email || '').toLowerCase())
-          .maybeSingle()
-        userData = byEmailRes.data
+      const res = await fetch('/api/dashboard')
+      if (!res.ok) {
+        if (res.status === 401) router.push('/auth/login')
+        setLoading(false)
+        return
       }
 
-      setUserName(userData?.full_name || userData?.email?.split('@')[0] || 'User')
-      setUserRole(resolveRole(userData))
-
-      // Fetch stats
-      const [projectsRes, tasksRes, usersRes, milestonesRes] = await Promise.all([
-        supabase.from('projects').select('status'),
-        supabase.from('tasks').select('status'),
-        supabase.from('users').select('id'),
-        supabase.from('milestones').select('id'),
-      ])
-
-      const projects = projectsRes.data || []
-      const tasks = tasksRes.data || []
-
-      setStats({
-        projects: projects.length,
-        activeProjects: projects.filter(p => p.status === 'active').length,
-        tasks: tasks.length,
-        pendingTasks: tasks.filter(t => t.status === 'todo' || t.status === 'in_progress').length,
-        teamMembers: usersRes.data?.length || 0,
-        milestones: milestonesRes.data?.length || 0,
-      })
-
-      // Fetch recent projects
-      const { data: recentProjectsData } = await supabase
-        .from('projects')
-        .select('id, name, status, description')
-        .order('created_at', { ascending: false })
-        .limit(4)
-
-      setRecentProjects(recentProjectsData || [])
-
-      // Fetch my tasks
-      const { data: myTasksData } = await supabase
-        .from('tasks')
-        .select(`
-          id,
-          title,
-          status,
-          priority,
-          due_date,
-          project:projects(name)
-        `)
-        .eq('assignee_id', user.id)
-        .in('status', ['todo', 'in_progress'])
-        .order('due_date')
-        .limit(5)
-
-      setMyTasks(myTasksData || [])
+      const d = await res.json()
+      setUserName(d.full_name || user.email?.split('@')[0] || 'User')
+      setUserRole(d.role ?? null)
+      setStats(d.stats)
+      setRecentProjects(d.recentProjects || [])
+      setProjectLinkSummaries(d.projectLinkSummaries || [])
+      setMyTasks(d.myTasks || [])
       setLoading(false)
     }
 
@@ -257,7 +208,7 @@ export default function DashboardPage() {
             ) : (
               <div className="grid gap-4 md:grid-cols-2">
                 {recentProjects.map((project) => (
-                  <Link key={project.id} href={`/projects/${project.id}`}>
+                  <Link key={project.id} href={projectHref(project, projectLinkSummaries)}>
                     <div className="p-4 border border-border rounded-lg hover:shadow-md transition-shadow cursor-pointer">
                       <h5 className="font-semibold text-foreground mb-1">{project.name}</h5>
                       <p className="text-sm text-muted-foreground mb-3 line-clamp-1">

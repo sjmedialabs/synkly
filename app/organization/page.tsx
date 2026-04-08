@@ -71,7 +71,7 @@ export default function OrganizationPage() {
 
       // Get user's client_id and role
       const { data: userData } = await supabase
-        .from('users')
+        .from('team')
         .select(`
           client_id,
           roles (name)
@@ -107,7 +107,7 @@ export default function OrganizationPage() {
 
       // Fetch stats
       const [usersRes, projectsRes, tasksRes] = await Promise.all([
-        supabase.from('users').select('id').eq('client_id', clientId).eq('status', 'active'),
+        supabase.from('team').select('id').eq('client_id', clientId).eq('status', 'active'),
         supabase.from('projects').select('id').eq('client_id', clientId),
         supabase.from('tasks').select('id, status, project_id'),
       ])
@@ -125,7 +125,7 @@ export default function OrganizationPage() {
 
       // Fetch recent team members
       const { data: membersData } = await supabase
-        .from('users')
+        .from('team')
         .select(`
           id,
           full_name,

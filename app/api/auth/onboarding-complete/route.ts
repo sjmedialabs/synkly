@@ -22,7 +22,7 @@ export async function POST() {
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
     const modernUpdate = await adminClient
-      .from('users')
+      .from('team')
       .update({
         status: 'active',
         password_reset_required: false,
@@ -31,7 +31,7 @@ export async function POST() {
       .eq('id', user.id)
 
     if (modernUpdate.error) {
-      await adminClient.from('users').update({ updated_at: new Date().toISOString() }).eq('id', user.id)
+      await adminClient.from('team').update({ updated_at: new Date().toISOString() }).eq('id', user.id)
     }
 
     return NextResponse.json({ success: true })
