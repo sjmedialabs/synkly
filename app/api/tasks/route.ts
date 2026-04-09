@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { canAccessAll, getAuthContext } from '@/lib/rbac-server'
+import { canAccessAll, getAuthContext, hasModulePermission } from '@/lib/rbac-server'
 import { getAccessibleProjectSummaries } from '@/lib/projects-access'
 import {
   fetchActivePeopleForAssignment,
@@ -236,7 +236,7 @@ export async function POST(request: NextRequest) {
   const { adminClient, userId, role } = ctx
 
   try {
-    if (!isFullAccessRole(role) && !hasPermission(role, 'CREATE_TASK')) {
+    if (!isFullAccessRole(role) && !hasPermission(role, 'CREATE_TASK') && !hasModulePermission(ctx, 'tasks', 'create')) {
       return NextResponse.json({ error: 'You do not have permission to create tasks' }, { status: 403 })
     }
 

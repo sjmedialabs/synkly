@@ -271,6 +271,57 @@ export default function TeamPage() {
         (a.full_name || a.email).localeCompare(b.full_name || b.email, undefined, { sensitivity: 'base' }),
     )
 
+  // Auto-role from designation: when designation changes, look up the mapped role
+  useEffect(() => {
+    if (!formData.designation_id) return
+    async function fetchMappedRole() {
+      try {
+        const res = await fetch(`/api/designation-roles?designation_id=${formData.designation_id}`)
+        if (!res.ok) return
+        const data = await res.json()
+        const mapping = (data.mappings || [])[0]
+        if (mapping?.roles?.name) {
+          setFormData((prev) => ({ ...prev, role: mapping.roles.name }))
+        }
+      } catch {}
+    }
+    fetchMappedRole()
+  }, [formData.designation_id])
+
+  // Cascading divisions: when department changes, reload divisions filtered by parent_id
+  useEffect(() => {
+    if (!formData.department_id) {
+      return
+    }
+    async function loadCascadingDivisions() {
+      try {
+        const res = await fetch(`/api/master-data/values?type=division&parent_id=${formData.department_id}`)
+        if (!res.ok) return
+        const data = await res.json()
+        const safeDivs = (data.values || []).filter((d: any) => d?.id && d?.name)
+        setDivisions(safeDivs)
+      } catch {}
+    }
+    loadCascadingDivisions()
+  }, [formData.department_id])
+
+  // Cascading designations: when division changes, reload designations filtered by parent_id
+  useEffect(() => {
+    if (!formData.division_id) {
+      return
+    }
+    async function loadCascadingDesignations() {
+      try {
+        const res = await fetch(`/api/master-data/values?type=designation&parent_id=${formData.division_id}`)
+        if (!res.ok) return
+        const data = await res.json()
+        const safeDesigs = (data.values || []).filter((d: any) => d?.id && d?.name)
+        setDesignations(safeDesigs)
+      } catch {}
+    }
+    loadCascadingDesignations()
+  }, [formData.division_id])
+
   // Filter team members based on search and filters
   useEffect(() => {
     let filtered = [...teamMembers]

@@ -1,5 +1,6 @@
 import { getAdminClient, getAuthContext } from '@/lib/rbac-server'
 import { NextRequest, NextResponse } from 'next/server'
+import { masterDataCache } from '@/lib/cache'
 
 export async function GET() {
   try {
@@ -14,6 +15,10 @@ export async function GET() {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
     }
 
+    // Check cache first
+    const cached = masterDataCache.get<any>('departments')
+    if (cached) return NextResponse.json(cached)
+
     const supabase = getAdminClient()
     const { data, error } = await supabase
       .from('master_departments')
@@ -23,6 +28,7 @@ export async function GET() {
 
     if (error) throw error
 
+    masterDataCache.set('departments', data)
     return NextResponse.json(data)
   } catch (error) {
     console.error('Error fetching departments:', error)
@@ -63,6 +69,7 @@ export async function POST(request: NextRequest) {
 
     if (error) throw error
 
+    masterDataCache.invalidatePrefix('departments')
     return NextResponse.json(data[0], { status: 201 })
   } catch (error) {
     console.error('Error creating department:', error)

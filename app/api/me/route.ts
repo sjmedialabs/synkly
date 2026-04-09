@@ -1,11 +1,15 @@
 import { NextResponse } from 'next/server'
 import { getAuthContext } from '@/lib/rbac-server'
+import { apiCache, tableCache, shortCacheHeaders } from '@/lib/cache'
 
 async function resolvePeopleTable(adminClient: any): Promise<'team' | 'users' | null> {
+  const cached = tableCache.get<'team' | 'users' | null>('peopleTable')
+  if (cached !== undefined) return cached
   const teamCheck = await adminClient.from('team').select('id').limit(1)
-  if (!teamCheck.error) return 'team'
+  if (!teamCheck.error) { tableCache.set('peopleTable', 'team'); return 'team' }
   const usersCheck = await adminClient.from('users').select('id').limit(1)
-  if (!usersCheck.error) return 'users'
+  if (!usersCheck.error) { tableCache.set('peopleTable', 'users'); return 'users' }
+  tableCache.set('peopleTable', null)
   return null
 }
 
@@ -13,6 +17,10 @@ export async function GET() {
   try {
     const ctx = await getAuthContext()
     if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+    const meCacheKey = `me:${ctx.userId}`
+    const cached = apiCache.get<any>(meCacheKey)
+    if (cached) return NextResponse.json(cached, { headers: shortCacheHeaders() })
 
     const peopleTable = await resolvePeopleTable(ctx.adminClient as any)
 
@@ -75,7 +83,7 @@ export async function GET() {
       }
     }
 
-    return NextResponse.json({
+    const mePayload = {
       userId: ctx.userId,
       email: profileRes.data?.email || ctx.email,
       full_name: profileRes.data?.full_name || profileRes.data?.name || null,
@@ -84,7 +92,9 @@ export async function GET() {
       status: profileStatus,
       isMasterAdmin: ctx.isMasterAdmin,
       isClientAdmin: ctx.isClientAdmin,
-    })
+    }
+    apiCache.set(meCacheKey, mePayload)
+    return NextResponse.json(mePayload, { headers: shortCacheHeaders() })
   } catch (e: any) {
     console.error('[me API] GET error:', e)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })

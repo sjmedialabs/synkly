@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
 import { canMutateMasterData, getAuthContext } from '@/lib/rbac-server'
+import { masterDataCache, longCacheHeaders } from '@/lib/cache'
 
 function getAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -15,6 +16,9 @@ export async function GET() {
     const ctx = await getAuthContext()
     if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+    const cached = masterDataCache.get<any>('types')
+    if (cached) return NextResponse.json({ types: cached }, { headers: longCacheHeaders() })
+
     const adminClient = getAdminClient()
     
     const { data, error } = await adminClient
@@ -24,6 +28,7 @@ export async function GET() {
       .order('name')
     
     if (!error) {
+      masterDataCache.set('types', data || [])
       return NextResponse.json({ types: data || [] })
     }
 
@@ -80,6 +85,7 @@ export async function POST(request: NextRequest) {
       .single()
     
     if (!error) {
+      masterDataCache.invalidatePrefix('types')
       return NextResponse.json({ type: data }, { status: 201 })
     }
 

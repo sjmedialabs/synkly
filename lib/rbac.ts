@@ -246,3 +246,145 @@ export interface UserWithRole {
   client_id: string | null
   status: 'active' | 'inactive' | 'suspended'
 }
+
+// ─── Granular Permission System (extends existing RBAC) ───
+
+/** Module × action permission map stored in roles.permissions JSONB */
+export type PermissionMap = Record<string, Record<string, boolean>>
+
+/** All modules that can appear in the granular permissions JSON */
+export const PERMISSION_MODULES = [
+  'projects',
+  'tasks',
+  'modules',
+  'team',
+  'reports',
+  'settings',
+  'master_data',
+  'sprints',
+  'milestones',
+] as const
+
+export type PermissionModule = (typeof PERMISSION_MODULES)[number]
+
+/** Actions per module (superset — not every module uses every action) */
+export const PERMISSION_ACTIONS = [
+  'view',
+  'create',
+  'edit',
+  'delete',
+  'assign',
+  'export',
+  'view_all',
+] as const
+
+export type PermissionAction = (typeof PERMISSION_ACTIONS)[number]
+
+/** Default granular permissions per role (mirrors the DB seed) */
+export const DEFAULT_GRANULAR_PERMISSIONS: Record<RoleKey, PermissionMap> = {
+  master_admin: Object.fromEntries(
+    PERMISSION_MODULES.map((m) => [m, Object.fromEntries(PERMISSION_ACTIONS.map((a) => [a, true]))]),
+  ),
+  client_admin: Object.fromEntries(
+    PERMISSION_MODULES.map((m) => [m, Object.fromEntries(PERMISSION_ACTIONS.map((a) => [a, true]))]),
+  ),
+  manager: {
+    projects:   { view: true, create: true, edit: true, delete: true, assign: false, export: false, view_all: false },
+    tasks:      { view: true, create: true, edit: true, delete: true, assign: true, export: false, view_all: false },
+    modules:    { view: true, create: true, edit: true, delete: false, assign: false, export: false, view_all: false },
+    team:       { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    reports:    { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    settings:   { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    master_data:{ view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    sprints:    { view: true, create: true, edit: true, delete: false, assign: false, export: false, view_all: false },
+    milestones: { view: true, create: true, edit: true, delete: false, assign: false, export: false, view_all: false },
+  },
+  team_lead: {
+    projects:   { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    tasks:      { view: true, create: true, edit: true, delete: false, assign: true, export: false, view_all: false },
+    modules:    { view: true, create: true, edit: true, delete: false, assign: false, export: false, view_all: false },
+    team:       { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    reports:    { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    settings:   { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    master_data:{ view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    sprints:    { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    milestones: { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+  },
+  member: {
+    projects:   { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    tasks:      { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    modules:    { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    team:       { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    reports:    { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    settings:   { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    master_data:{ view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    sprints:    { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    milestones: { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+  },
+}
+
+/**
+ * Check a granular permission from the roles.permissions JSONB.
+ * Returns undefined if the permission map doesn't contain the module/action
+ * (caller should fall back to legacy check).
+ */
+export function hasGranularPermission(
+  permissions: PermissionMap | null | undefined,
+  module: string,
+  action: string,
+): boolean | undefined {
+  if (!permissions || typeof permissions !== 'object') return undefined
+  const mod = permissions[module]
+  if (!mod || typeof mod !== 'object') return undefined
+  const val = mod[action]
+  if (typeof val !== 'boolean') return undefined
+  return val
+}
+
+/**
+ * Unified permission check: granular JSON first, then legacy ROLE_PERMISSIONS fallback.
+ */
+export function checkPermission(
+  role: RoleKey | null,
+  rolePermissionsJson: PermissionMap | null | undefined,
+  module: string,
+  action: string,
+): boolean {
+  // 1. Try granular JSON from the DB
+  const granular = hasGranularPermission(rolePermissionsJson, module, action)
+  if (granular !== undefined) return granular
+
+  // 2. Try default granular for this role
+  if (role) {
+    const defaults = DEFAULT_GRANULAR_PERMISSIONS[role]
+    const defaultGranular = hasGranularPermission(defaults, module, action)
+    if (defaultGranular !== undefined) return defaultGranular
+  }
+
+  // 3. Fall back to legacy permission strings
+  if (!role) return false
+  const legacyMap: Record<string, string> = {
+    'projects.view': 'VIEW_PROJECT',
+    'projects.create': 'CREATE_PROJECT',
+    'projects.edit': 'UPDATE_PROJECT',
+    'projects.delete': 'DELETE_PROJECT',
+    'tasks.view': 'VIEW_TASK',
+    'tasks.create': 'CREATE_TASK',
+    'tasks.edit': 'UPDATE_TASK',
+    'tasks.delete': 'DELETE_TASK',
+    'tasks.assign': 'ASSIGN_TASK',
+    'team.view': 'VIEW_TEAM',
+    'team.create': 'CREATE_USER',
+    'team.edit': 'UPDATE_USER',
+    'team.delete': 'DELETE_USER',
+    'reports.view': 'VIEW_REPORTS',
+    'reports.export': 'EXPORT_DATA',
+    'settings.view': 'MANAGE_SETTINGS',
+    'settings.edit': 'MANAGE_SETTINGS',
+    'master_data.view': 'MANAGE_MASTER_DATA',
+    'master_data.edit': 'MANAGE_MASTER_DATA',
+  }
+  const legacyPerm = legacyMap[`${module}.${action}`]
+  if (legacyPerm) return hasPermission(role, legacyPerm)
+  return false
+}

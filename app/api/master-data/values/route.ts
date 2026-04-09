@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
 import { canMutateMasterData, getAuthContext } from '@/lib/rbac-server'
+import { masterDataCache } from '@/lib/cache'
 
 function getAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -72,6 +73,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Type parameter is required' }, { status: 400 })
     }
     
+    const cacheKey = `values:${typeParam}:${parentId || ''}:${tenantId || ''}`
+    const cached = masterDataCache.get<any>(cacheKey)
+    if (cached) return NextResponse.json({ values: cached })
+
     const adminClient = getAdminClient()
     
     const typeId = await resolveOrCreateTypeId(adminClient, typeParam, false)
@@ -128,6 +133,7 @@ export async function GET(request: NextRequest) {
 
     const modernRes = await modernQuery
     if (!modernRes.error) {
+      masterDataCache.set(cacheKey, modernRes.data || [])
       return NextResponse.json({ values: modernRes.data || [] })
     }
 
@@ -282,6 +288,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    masterDataCache.invalidatePrefix('values')
     return NextResponse.json({ value: globalValue, created: true }, { status: 201 })
   } catch (err: unknown) {
     console.error('[master-data values API] POST error:', err)
@@ -309,15 +316,15 @@ export async function DELETE(request: NextRequest) {
 
     const md = await del('master_data_values')
     if (md.error) return NextResponse.json({ error: md.error.message }, { status: 500 })
-    if (md.data && md.data.length > 0) return NextResponse.json({ success: true })
+    if (md.data && md.data.length > 0) { masterDataCache.invalidatePrefix('values'); return NextResponse.json({ success: true }) }
 
     const dept = await del('master_departments')
     if (dept.error) return NextResponse.json({ error: dept.error.message }, { status: 500 })
-    if (dept.data && dept.data.length > 0) return NextResponse.json({ success: true })
+    if (dept.data && dept.data.length > 0) { masterDataCache.invalidatePrefix('values'); masterDataCache.invalidatePrefix('departments'); return NextResponse.json({ success: true }) }
 
     const desig = await del('master_designations')
     if (desig.error) return NextResponse.json({ error: desig.error.message }, { status: 500 })
-    if (desig.data && desig.data.length > 0) return NextResponse.json({ success: true })
+    if (desig.data && desig.data.length > 0) { masterDataCache.invalidatePrefix('values'); masterDataCache.invalidatePrefix('designations'); return NextResponse.json({ success: true }) }
 
     return NextResponse.json(
       { error: 'Could not delete this value (not found or blocked by database rules).' },

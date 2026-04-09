@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { apiCache, shortCacheHeaders } from '@/lib/cache'
 import {
   getAuthContext,
   canAccessAll,
@@ -377,6 +378,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    apiCache.invalidatePrefix('projects:')
     return NextResponse.json({ project: data }, { status: 201 })
   } catch (err: any) {
     console.error('Error in POST /api/projects:', err)

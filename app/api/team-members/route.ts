@@ -169,7 +169,28 @@ export async function POST(request: NextRequest) {
       )
     }
     if (!(role in ROLE_LABELS)) {
-      return NextResponse.json({ error: 'Invalid role selected' }, { status: 400 })
+      // If role not provided but designation_id is, try auto-assign from designation_roles
+      if (designation_id && !role) {
+        try {
+          const { data: mapping } = await adminClient
+            .from('designation_roles')
+            .select('role_id, roles (name)')
+            .eq('designation_id', designation_id)
+            .maybeSingle()
+          if (mapping?.roles && typeof (mapping.roles as any).name === 'string') {
+            const autoRole = (mapping.roles as any).name as string
+            if (autoRole in ROLE_LABELS) {
+              // Use the mapped role - reassign for downstream logic
+              ;(body as any).role = autoRole
+            }
+          }
+        } catch {}
+      }
+      // Re-check after auto-assignment attempt
+      const finalRole = String((body as any).role || role || '').trim().toLowerCase()
+      if (!(finalRole in ROLE_LABELS)) {
+        return NextResponse.json({ error: 'Invalid role selected' }, { status: 400 })
+      }
     }
     if (!Number.isFinite(experience_years) || experience_years < 0 || experience_years > 50) {
       return NextResponse.json({ error: 'experience_years must be between 0 and 50' }, { status: 400 })

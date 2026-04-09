@@ -72,8 +72,12 @@ const menuConfig: Record<RoleKey, MenuItem[]> = {
     { label: 'Risks', href: '/risks', icon: ShieldAlert },
     { label: 'Reports', href: '/reports', icon: BarChart3 },
     {
-      label: 'Settings', href: '/organization/settings', icon: Settings,
-      children: [{ label: 'Master Data', href: '/organization/settings', icon: Database }],
+      label: 'Settings', href: '/settings', icon: Settings,
+      children: [
+        { label: 'Master Data', href: '/settings/master-data', icon: Database },
+        { label: 'Roles & Permissions', href: '/settings/master-data', icon: Shield },
+        { label: 'Org Structure', href: '/settings/master-data', icon: Building2 },
+      ],
     },
   ],
   manager: [

@@ -28,13 +28,70 @@ export async function getAccessibleProjectSummaries(
   }
 
   if (role === 'manager' && clientId) {
-    const { data, error } = await adminClient
-      .from('projects')
-      .select('id, name')
-      .eq('client_id', clientId)
-      .order('created_at', { ascending: false })
-    if (error) return []
-    return data || []
+    // Check if manager has view_all permission (e.g. Delivery Manager)
+    const hasViewAll = ctx.permissions?.projects?.view_all === true
+    
+    if (hasViewAll) {
+      // Delivery Manager equivalent: see all projects in client
+      const { data, error } = await adminClient
+        .from('projects')
+        .select('id, name')
+        .eq('client_id', clientId)
+        .order('created_at', { ascending: false })
+      if (error) return []
+      return data || []
+    }
+    
+    // Project Manager: see projects they lead, are assigned to, or within their department
+    const [leadRes, assignedRes, userProfileRes] = await Promise.all([
+      adminClient.from('projects').select('id, name, client_id').eq('project_lead_id', userId),
+      adminClient.from('project_users').select('project_id').eq('user_id', userId),
+      adminClient.from('team').select('department_id').eq('id', userId).maybeSingle(),
+    ])
+    
+    const byId = new Map<string, { id: string; name: string | null }>()
+    
+    // Projects they lead
+    if (!leadRes.error) {
+      for (const p of (leadRes.data || []).filter((p: any) => p?.client_id === clientId)) {
+        byId.set(p.id, { id: p.id, name: p.name })
+      }
+    }
+    
+    // Projects they're assigned to
+    const assignedIds = (assignedRes.data || []).map((r: any) => r.project_id).filter(Boolean)
+    if (assignedIds.length > 0) {
+      const { data: assignedProjects } = await adminClient
+        .from('projects')
+        .select('id, name, client_id')
+        .in('id', assignedIds)
+      for (const p of (assignedProjects || []).filter((p: any) => p?.client_id === clientId)) {
+        byId.set(p.id, { id: p.id, name: p.name })
+      }
+    }
+    
+    // Projects where the lead is in the same department
+    const managerDeptId = userProfileRes.data?.department_id
+    if (managerDeptId) {
+      const { data: deptUsers } = await adminClient
+        .from('team')
+        .select('id')
+        .eq('department_id', managerDeptId)
+        .eq('client_id', clientId)
+      const deptUserIds = (deptUsers || []).map((u: any) => u.id).filter(Boolean)
+      if (deptUserIds.length > 0) {
+        const { data: deptProjects } = await adminClient
+          .from('projects')
+          .select('id, name, client_id')
+          .in('project_lead_id', deptUserIds)
+          .eq('client_id', clientId)
+        for (const p of deptProjects || []) {
+          byId.set(p.id, { id: p.id, name: p.name })
+        }
+      }
+    }
+    
+    return Array.from(byId.values())
   }
 
   if (role === 'team_lead') {

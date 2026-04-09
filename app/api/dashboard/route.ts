@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { getAuthContext } from '@/lib/rbac-server'
+import { apiCache, tableCache, shortCacheHeaders } from '@/lib/cache'
 import type { RoleKey } from '@/lib/rbac'
 
 function missingTable(err: { code?: string; message?: string } | null) {
@@ -10,10 +11,13 @@ function missingTable(err: { code?: string; message?: string } | null) {
 }
 
 async function resolvePeopleTable(adminClient: any): Promise<'team' | 'users' | null> {
+  const cached = tableCache.get<'team' | 'users' | null>('peopleTable')
+  if (cached !== undefined) return cached
   const teamCheck = await adminClient.from('team').select('id').limit(1)
-  if (!teamCheck.error) return 'team'
+  if (!teamCheck.error) { tableCache.set('peopleTable', 'team'); return 'team' }
   const usersCheck = await adminClient.from('users').select('id').limit(1)
-  if (!usersCheck.error) return 'users'
+  if (!usersCheck.error) { tableCache.set('peopleTable', 'users'); return 'users' }
+  tableCache.set('peopleTable', null)
   return null
 }
 
@@ -21,6 +25,11 @@ export async function GET() {
   try {
     const ctx = await getAuthContext()
     if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+    // Return cached dashboard if available (60s TTL)
+    const cacheKey = `dashboard:${ctx.userId}`
+    const cached = apiCache.get<any>(cacheKey)
+    if (cached) return NextResponse.json(cached, { headers: shortCacheHeaders() })
 
     const admin = ctx.adminClient
     const peopleTable = await resolvePeopleTable(admin)
@@ -128,7 +137,7 @@ export async function GET() {
       milestones: milestoneCount,
     }
 
-    return NextResponse.json({
+    const payload = {
       full_name,
       role,
       status,
@@ -136,7 +145,9 @@ export async function GET() {
       recentProjects,
       projectLinkSummaries,
       myTasks,
-    })
+    }
+    apiCache.set(cacheKey, payload)
+    return NextResponse.json(payload, { headers: shortCacheHeaders() })
   } catch (e: any) {
     console.error('[dashboard API] GET error:', e)
     return NextResponse.json({ error: e?.message || 'Internal server error' }, { status: 500 })

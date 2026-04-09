@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase/server'
+import { type PermissionMap, checkPermission } from '@/lib/rbac'
 import { type RoleKey, ROLE_PERMISSIONS, ROLE_LEVELS, type UserWithRole } from '@/lib/rbac'
 
 export interface AuthContext {
@@ -84,8 +85,36 @@ function createAuthContext(user: UserWithRole): AuthContext {
   
   const hasPermission = (permission: string): boolean => {
     if (!role) return false
+    // Try granular permissions from role JSON first
+    const permsJson = user.role_permissions as PermissionMap | null
+    if (permsJson && typeof permsJson === 'object') {
+      const legacyToModuleAction: Record<string, [string, string]> = {
+        VIEW_PROJECT: ['projects', 'view'],
+        CREATE_PROJECT: ['projects', 'create'],
+        UPDATE_PROJECT: ['projects', 'edit'],
+        DELETE_PROJECT: ['projects', 'delete'],
+        VIEW_TASK: ['tasks', 'view'],
+        CREATE_TASK: ['tasks', 'create'],
+        UPDATE_TASK: ['tasks', 'edit'],
+        DELETE_TASK: ['tasks', 'delete'],
+        ASSIGN_TASK: ['tasks', 'assign'],
+        VIEW_TEAM: ['team', 'view'],
+        CREATE_USER: ['team', 'create'],
+        UPDATE_USER: ['team', 'edit'],
+        DELETE_USER: ['team', 'delete'],
+        VIEW_REPORTS: ['reports', 'view'],
+        EXPORT_DATA: ['reports', 'export'],
+        MANAGE_SETTINGS: ['settings', 'edit'],
+        MANAGE_MASTER_DATA: ['master_data', 'edit'],
+      }
+      const mapping = legacyToModuleAction[permission]
+      if (mapping) {
+        return checkPermission(role, permsJson, mapping[0], mapping[1])
+      }
+    }
+    // Fall back to static ROLE_PERMISSIONS
     const perms = ROLE_PERMISSIONS[role] || []
-    return perms.includes('ALL') || perms.includes(permission)
+    return perms.includes('ALL') || perms.includes('ALL_CLIENT') || perms.includes(permission)
   }
   
   const canAccessResource = (requiredRole: RoleKey): boolean => {

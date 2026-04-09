@@ -11,6 +11,7 @@ import {
   resolveRole,
   normalizeRole,
 } from '@/lib/rbac'
+import { authCache, tableCache } from '@/lib/cache'
 
 export function getAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -44,6 +45,7 @@ export async function upsertClientRowForFk(
 }
 
 export interface AuthContextResult {
+  permissions: Record<string, Record<string, boolean>> | null
   userId: string | null
   email: string | null
   role: RoleKey | null
@@ -69,16 +71,28 @@ export async function getAuthContext(): Promise<AuthContextResult> {
       email: null,
       role: null, 
       clientId: null,
-      tenantId: null, 
+      tenantId: null,
+      permissions: null, 
       adminClient,
       isMasterAdmin: false,
       isClientAdmin: false,
     }
   }
+
+  // Return cached auth context if available (avoids 2-6 extra DB queries)
+  const cachedAuth = authCache.get<Omit<AuthContextResult, 'adminClient'>>(`auth:${user.id}`)
+  if (cachedAuth) {
+    return { ...cachedAuth, adminClient }
+  }
   
-  const teamCheck = await adminClient.from('team').select('id').limit(1)
-  const usersCheck = await adminClient.from('users').select('id').limit(1)
-  const peopleTable: 'team' | 'users' | null = !teamCheck.error ? 'team' : !usersCheck.error ? 'users' : null
+  // Cache table resolution — this never changes at runtime
+  let peopleTable = tableCache.get<'team' | 'users' | null>('peopleTable')
+  if (peopleTable === undefined) {
+    const teamCheck = await adminClient.from('team').select('id').limit(1)
+    const usersCheck = await adminClient.from('users').select('id').limit(1)
+    peopleTable = !teamCheck.error ? 'team' : !usersCheck.error ? 'users' : null
+    tableCache.set('peopleTable', peopleTable)
+  }
 
   // Prefer peopleTable.role + roles join; fall back if role column is absent in older DBs
   let userData: any = null
@@ -166,16 +180,44 @@ export async function getAuthContext(): Promise<AuthContextResult> {
   const metaClientId = typeof meta?.client_id === 'string' ? meta.client_id : null
   const clientId = userData?.client_id || metaClientId || null
 
-  return {
+  // Fetch granular permissions from role
+  let rolePermissions: Record<string, Record<string, boolean>> | null = null
+  if (role && userData?.role_id) {
+    const { data: permRole } = await adminClient
+      .from('roles')
+      .select('permissions')
+      .eq('id', userData.role_id)
+      .maybeSingle()
+    if (permRole?.permissions && typeof permRole.permissions === 'object') {
+      rolePermissions = permRole.permissions as Record<string, Record<string, boolean>>
+    }
+  }
+
+  const result = {
     userId: user.id,
     email: userData?.email || user.email || null,
     role,
     clientId,
     tenantId: clientId, // Keep for backward compatibility
     adminClient,
+    permissions: rolePermissions,
     isMasterAdmin: role === 'master_admin',
     isClientAdmin: role === 'client_admin',
   }
+
+  // Cache the resolved auth context (excluding adminClient) for 30s
+  authCache.set(`auth:${user.id}`, {
+    userId: result.userId,
+    email: result.email,
+    role: result.role,
+    clientId: result.clientId,
+    tenantId: result.tenantId,
+    permissions: result.permissions,
+    isMasterAdmin: result.isMasterAdmin,
+    isClientAdmin: result.isClientAdmin,
+  })
+
+  return result
 }
 
 /**
@@ -323,3 +365,26 @@ export function applyClientFilter<T extends { eq: (column: string, value: string
   // Return query that will find nothing
   return query.eq(column, '00000000-0000-0000-0000-000000000000')
 }
+
+// ─── Granular Permission Helpers (extends existing server RBAC) ───
+
+import { type PermissionMap, checkPermission } from '@/lib/rbac'
+
+/**
+ * Check a module.action permission using the auth context.
+ * Uses granular JSON first, falls back to role hierarchy.
+ */
+export function hasModulePermission(
+  ctx: AuthContextResult,
+  module: string,
+  action: string,
+): boolean {
+  // Master admin bypasses all checks
+  if (ctx.isMasterAdmin) return true
+  return checkPermission(ctx.role, ctx.permissions ?? null, module, action)
+}
+
+// Extend AuthContextResult to include permissions field.
+// The getAuthContext function above already fetches roles (name).
+// We patch it here to also carry the permissions JSONB when available.
+// Callers can access ctx.permissions for the granular map.
