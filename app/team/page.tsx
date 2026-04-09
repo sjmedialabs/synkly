@@ -210,6 +210,14 @@ export default function TeamPage() {
             const divJson = await divRes.json()
             const safeDivs = (divJson.divisions || []).filter((d: any) => d?.id && d?.name)
             setDivisions(safeDivs as MasterDataValue[])
+          } else {
+            // Fallback to master-data hierarchy values when /api/divisions is unavailable
+            const divFallback = await fetch('/api/master-data/values?type=division')
+            if (divFallback.ok) {
+              const divJson = await divFallback.json()
+              const safeDivs = (divJson.values || []).filter((d: any) => d?.id && d?.name)
+              setDivisions(safeDivs as MasterDataValue[])
+            }
           }
 
           // Fetch team leads for reporting manager dropdown

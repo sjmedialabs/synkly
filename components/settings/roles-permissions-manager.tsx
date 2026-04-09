@@ -91,6 +91,26 @@ export function RolesPermissionsManager() {
     }))
   }
 
+  function getColumnCheckedState(action: string): boolean | 'indeterminate' {
+    const selectedCount = PERMISSION_MODULES.filter((module) => editPermissions[module]?.[action] ?? false).length
+    if (selectedCount === 0) return false
+    if (selectedCount === PERMISSION_MODULES.length) return true
+    return 'indeterminate'
+  }
+
+  function togglePermissionColumn(action: string, checked: boolean) {
+    setEditPermissions((prev) => {
+      const next = { ...prev }
+      for (const module of PERMISSION_MODULES) {
+        next[module] = {
+          ...(next[module] || {}),
+          [action]: checked,
+        }
+      }
+      return next
+    })
+  }
+
   async function handleSave() {
     if (!selectedRole) return
     setSaving(true)
@@ -325,8 +345,14 @@ export function RolesPermissionsManager() {
                   <div className="grid gap-2 mb-3" style={{ gridTemplateColumns: `160px repeat(${PERMISSION_ACTIONS.length}, 1fr)` }}>
                     <div className="text-sm font-semibold text-foreground">Module</div>
                     {PERMISSION_ACTIONS.map((action) => (
-                      <div key={action} className="text-sm font-semibold text-foreground text-center">
-                        {ACTION_LABELS[action] || action}
+                      <div key={action} className="flex items-center justify-center gap-2 text-sm font-semibold text-foreground">
+                        {isEditing && (
+                          <Checkbox
+                            checked={getColumnCheckedState(action)}
+                            onCheckedChange={(v) => togglePermissionColumn(action, v === true)}
+                          />
+                        )}
+                        <span>{ACTION_LABELS[action] || action}</span>
                       </div>
                     ))}
                   </div>

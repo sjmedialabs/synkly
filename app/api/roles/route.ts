@@ -1,13 +1,42 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthContext } from '@/lib/rbac-server'
 import { longCacheHeaders, masterDataCache } from '@/lib/cache'
+import { ROLE_KEYS } from '@/lib/rbac'
+
+function isMissingRolesTable(err: { code?: string; message?: string } | null) {
+  if (!err) return false
+  if (err.code === 'PGRST205') return true
+  const m = String(err.message || '').toLowerCase()
+  return m.includes('public.roles') || m.includes('could not find the table')
+}
+
+function fallbackRoles() {
+  return ROLE_KEYS.map((name) => ({
+    id: name,
+    name,
+    description: null,
+    permissions: {},
+    created_at: null,
+    updated_at: null,
+  }))
+}
+
+function missingRolesTableResponse() {
+  return NextResponse.json(
+    {
+      error:
+        "Could not find the table 'public.roles' in the schema cache. Run scripts/023_ensure_roles_table.sql in Supabase SQL Editor, then reload API schema.",
+    },
+    { status: 503 },
+  )
+}
 
 export async function GET() {
   try {
     const ctx = await getAuthContext()
     if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    const { adminClient, isMasterAdmin } = ctx
+    const { adminClient } = ctx
 
     const cached = masterDataCache.get<any>('roles')
     if (cached) return NextResponse.json({ roles: cached }, { headers: longCacheHeaders() })
@@ -17,7 +46,14 @@ export async function GET() {
       .select('id, name, description, permissions, created_at, updated_at')
       .order('name')
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    if (error) {
+      if (isMissingRolesTable(error)) {
+        const fallback = fallbackRoles()
+        masterDataCache.set('roles', fallback)
+        return NextResponse.json({ roles: fallback }, { headers: longCacheHeaders() })
+      }
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
     masterDataCache.set('roles', data || [])
     return NextResponse.json({ roles: data || [] })
   } catch (e) {
@@ -44,11 +80,14 @@ export async function POST(request: NextRequest) {
     // Clone support: if clone_from is provided, copy permissions from source role
     let finalPermissions = permissions
     if (body.clone_from) {
-      const { data: source } = await ctx.adminClient
+      const { data: source, error: cloneErr } = await ctx.adminClient
         .from('roles')
         .select('permissions')
         .eq('id', body.clone_from)
         .maybeSingle()
+      if (cloneErr && isMissingRolesTable(cloneErr)) {
+        return missingRolesTableResponse()
+      }
       if (source?.permissions) {
         finalPermissions = source.permissions
       }
@@ -65,6 +104,9 @@ export async function POST(request: NextRequest) {
       .single()
 
     if (error) {
+      if (isMissingRolesTable(error)) {
+        return missingRolesTableResponse()
+      }
       if (error.code === '23505') {
         return NextResponse.json({ error: 'A role with this name already exists' }, { status: 409 })
       }
@@ -112,7 +154,12 @@ export async function PUT(request: NextRequest) {
       .select('*')
       .single()
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    if (error) {
+      if (isMissingRolesTable(error)) {
+        return missingRolesTableResponse()
+      }
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
     masterDataCache.delete('roles')
     return NextResponse.json({ role: data })
   } catch (e) {
@@ -133,11 +180,14 @@ export async function DELETE(request: NextRequest) {
     if (!id) return NextResponse.json({ error: 'Role ID is required' }, { status: 400 })
 
     // Prevent deletion of core roles
-    const { data: roleData } = await ctx.adminClient
+    const { data: roleData, error: readErr } = await ctx.adminClient
       .from('roles')
       .select('name')
       .eq('id', id)
       .maybeSingle()
+    if (readErr && isMissingRolesTable(readErr)) {
+      return missingRolesTableResponse()
+    }
 
     const protectedRoles = ['master_admin', 'super_admin', 'client_admin', 'manager', 'team_lead', 'member', 'employee']
     if (roleData?.name && protectedRoles.includes(roleData.name)) {
@@ -145,7 +195,12 @@ export async function DELETE(request: NextRequest) {
     }
 
     const { error } = await ctx.adminClient.from('roles').delete().eq('id', id)
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    if (error) {
+      if (isMissingRolesTable(error)) {
+        return missingRolesTableResponse()
+      }
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
     masterDataCache.delete('roles')
     return NextResponse.json({ success: true })
   } catch (e) {
