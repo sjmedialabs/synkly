@@ -190,6 +190,11 @@ export function hasFullClientAccess(role: RoleKey | null): boolean {
   return role === 'master_admin' || role === 'client_admin'
 }
 
+/** Returns true for roles that can access all data within their client scope (admin + manager). */
+export function canAccessClientScope(role: RoleKey | null): boolean {
+  return role === 'master_admin' || role === 'client_admin' || role === 'manager'
+}
+
 export function canManageUsers(role: RoleKey | null): boolean {
   return role === 'master_admin' || role === 'client_admin'
 }

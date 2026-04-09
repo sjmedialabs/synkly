@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthContext, type AuthContextResult } from '@/lib/rbac-server'
+import { canAccessClientScope } from '@/lib/rbac'
 import { getAccessibleProjectSummaries } from '@/lib/projects-access'
 
 function isMissingSprintsTableMessage(messages: string[]) {
@@ -26,6 +27,16 @@ function normalizeSprintRows(rows: any[] | null) {
 async function userCanReadSprintsForProject(ctx: AuthContextResult, projectId: string): Promise<boolean> {
   if (!ctx.userId) return false
   if (ctx.isMasterAdmin) return true
+  // Managers and client admins with client scope can access all sprints in their org's projects
+  if (canAccessClientScope(ctx.role) && ctx.clientId) {
+    const { data } = await ctx.adminClient
+      .from('projects')
+      .select('id')
+      .eq('id', projectId)
+      .eq('client_id', ctx.clientId)
+      .maybeSingle()
+    if (data?.id) return true
+  }
   const summaries = await getAccessibleProjectSummaries(ctx)
   return summaries.some((p) => p.id === projectId)
 }
@@ -202,6 +213,34 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ sprint }, { status: 201 })
   } catch (err) {
     console.error('[sprints API] POST error:', err)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  }
+}
+
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+    const id = new URL(request.url).searchParams.get('id')
+    if (!id) return NextResponse.json({ error: 'id is required' }, { status: 400 })
+
+    // Try sprints table first
+    const { error: sprintErr } = await ctx.adminClient.from('sprints').delete().eq('id', id)
+    if (!sprintErr) {
+      return NextResponse.json({ success: true })
+    }
+
+    // Fallback to sprint_tracking
+    const { error: trackingErr } = await ctx.adminClient.from('sprint_tracking').delete().eq('id', id)
+    if (!trackingErr) {
+      return NextResponse.json({ success: true })
+    }
+
+    return NextResponse.json({ error: trackingErr?.message || 'Failed to delete sprint' }, { status: 500 })
+  } catch (err) {
+    console.error('[sprints API] DELETE error:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

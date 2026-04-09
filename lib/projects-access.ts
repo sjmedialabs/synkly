@@ -27,7 +27,25 @@ export async function getAccessibleProjectSummaries(
     return data || []
   }
 
-  if (role === 'manager' && clientId) {
+  if (role === 'manager') {
+    if (!clientId) {
+      // Manager without clientId: fall back to projects they lead or are assigned to
+      const [leadRes, assignedRes] = await Promise.all([
+        adminClient.from('projects').select('id, name').eq('project_lead_id', userId),
+        adminClient.from('project_users').select('project_id').eq('user_id', userId),
+      ])
+      const byId = new Map<string, { id: string; name: string | null }>()
+      if (!leadRes.error) {
+        for (const p of leadRes.data || []) byId.set(p.id, { id: p.id, name: p.name })
+      }
+      const assignedIds = (assignedRes.data || []).map((r: any) => r.project_id).filter(Boolean)
+      if (assignedIds.length > 0) {
+        const { data: assignedProjects } = await adminClient.from('projects').select('id, name').in('id', assignedIds)
+        for (const p of assignedProjects || []) byId.set(p.id, { id: p.id, name: p.name })
+      }
+      return Array.from(byId.values())
+    }
+    // Manager with clientId:
     // Check if manager has view_all permission (e.g. Delivery Manager)
     const hasViewAll = ctx.permissions?.projects?.view_all === true
     

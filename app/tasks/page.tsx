@@ -16,7 +16,8 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core'
 import { CSS } from '@dnd-kit/utilities'
-import { GripVertical } from 'lucide-react'
+import { GripVertical, Upload } from 'lucide-react'
+import Link from 'next/link'
 import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { SmartAssignModal } from '@/components/tasks/smart-assign-modal'
 import { hasPermission, isFullAccessRole } from '@/lib/rbac'
@@ -437,6 +438,12 @@ export default function TasksPage() {
       subtitle={canViewAll ? 'All tasks' : 'Your permitted task scope'}
       actions={
         <div className="flex items-center gap-2 flex-wrap">
+          <Link href="/tasks/bulk-upload">
+            <button className="flex items-center gap-1.5 px-2.5 py-1.5 border border-input rounded-lg bg-background text-foreground text-xs hover:bg-muted transition">
+              <Upload className="w-3.5 h-3.5" />
+              Bulk Upload
+            </button>
+          </Link>
           <select
             value={filterStatus || ''}
             onChange={(e) => setFilterStatus(e.target.value || null)}

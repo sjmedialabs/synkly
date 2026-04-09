@@ -186,26 +186,6 @@ export default function MilestonesPage() {
         </Button>
       }
     >
-      {/* Stats */}
-      <div className="grid gap-4 md:grid-cols-4 mb-8">
-        {Object.entries(groupedMilestones).map(([status, items]) => {
-          const Icon = statusIcons[status]
-          return (
-            <Card key={status}>
-              <CardContent className="pt-6">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-muted-foreground capitalize">{status.replace('_', ' ')}</p>
-                    <p className="text-2xl font-bold text-foreground">{items.length}</p>
-                  </div>
-                  <Icon className={`w-8 h-8 ${status === 'completed' ? 'text-green-500' : status === 'blocked' ? 'text-destructive' : 'text-muted-foreground'}`} />
-                </div>
-              </CardContent>
-            </Card>
-          )
-        })}
-      </div>
-
       {/* Milestone Cards */}
       {milestones.length === 0 ? (
         <Card>

@@ -7,7 +7,7 @@ import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { Plus, X, Calendar, Play, CheckCircle2, Clock } from 'lucide-react'
+import { Plus, X, Calendar, Play, CheckCircle2, Clock, Trash2 } from 'lucide-react'
 
 interface Sprint {
   id: string
@@ -189,6 +189,20 @@ export default function SprintsPage() {
     }
   }
 
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this sprint?')) return
+    try {
+      const res = await fetch(`/api/sprints?id=${id}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const data = await res.json()
+        throw new Error(data.error || 'Failed to delete')
+      }
+      setSprints((prev) => prev.filter((s) => s.id !== id))
+    } catch (err: any) {
+      alert('Error: ' + err.message)
+    }
+  }
+
   const getSprintProgress = (sprint: Sprint) => {
     if (!sprint.start_date || !sprint.end_date) return 0
     const start = new Date(sprint.start_date).getTime()
@@ -231,26 +245,6 @@ export default function SprintsPage() {
         </Button>
       }
     >
-      {/* Stats */}
-      <div className="grid gap-4 md:grid-cols-3 mb-8">
-        {Object.entries(groupedSprints).map(([status, items]) => {
-          const Icon = statusIcons[status]
-          return (
-            <Card key={status}>
-              <CardContent className="pt-6">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-muted-foreground capitalize">{status}</p>
-                    <p className="text-2xl font-bold text-foreground">{items.length}</p>
-                  </div>
-                  <Icon className={`w-8 h-8 ${status === 'completed' ? 'text-green-500' : status === 'active' ? 'text-primary' : 'text-muted-foreground'}`} />
-                </div>
-              </CardContent>
-            </Card>
-          )
-        })}
-      </div>
-
       {/* Active Sprints */}
       {groupedSprints.active.length > 0 && (
         <div className="mb-8">
@@ -288,14 +282,19 @@ export default function SprintsPage() {
                       {sprint.end_date && <span>{new Date(sprint.end_date).toLocaleDateString()}</span>}
                     </div>
 
-                    <Button 
-                      size="sm" 
-                      className="w-full"
-                      onClick={() => handleStatusChange(sprint.id, 'completed')}
-                    >
-                      <CheckCircle2 className="w-4 h-4 mr-2" />
-                      Complete Sprint
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button 
+                        size="sm" 
+                        className="flex-1"
+                        onClick={() => handleStatusChange(sprint.id, 'completed')}
+                      >
+                        <CheckCircle2 className="w-4 h-4 mr-2" />
+                        Complete
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => handleDelete(sprint.id)} className="text-destructive hover:bg-destructive/10">
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
                   </CardContent>
                 </Card>
               )
@@ -344,17 +343,22 @@ export default function SprintsPage() {
                       </div>
                     )}
 
-                    {sprint.status === 'planned' && (
-                      <Button 
-                        size="sm" 
-                        variant="outline"
-                        className="w-full"
-                        onClick={() => handleStatusChange(sprint.id, 'active')}
-                      >
-                        <Play className="w-4 h-4 mr-2" />
-                        Start Sprint
+                    <div className="flex gap-2">
+                      {sprint.status === 'planned' && (
+                        <Button 
+                          size="sm" 
+                          variant="outline"
+                          className="flex-1"
+                          onClick={() => handleStatusChange(sprint.id, 'active')}
+                        >
+                          <Play className="w-4 h-4 mr-2" />
+                          Start Sprint
+                        </Button>
+                      )}
+                      <Button size="sm" variant="outline" onClick={() => handleDelete(sprint.id)} className="text-destructive hover:bg-destructive/10">
+                        <Trash2 className="w-4 h-4" />
                       </Button>
-                    )}
+                    </div>
                   </CardContent>
                 </Card>
               )

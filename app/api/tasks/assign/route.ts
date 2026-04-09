@@ -268,16 +268,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'User not found' }, { status: 400 })
       }
 
-      const resolvedRole = await resolveAssignmentPersonRole(supabase, assigneeId)
-      if (!isAssignableTaskRole(resolvedRole)) {
-        return NextResponse.json(
-          {
-            error:
-              'Tasks can only be assigned to team leads and team members (not managers or administrators).',
-          },
-          { status: 403 },
-        )
-      }
+      // Allow assigning to any active team member
 
       if (assignee.designation && RESTRICTED_DESIGNATIONS.includes(assignee.designation)) {
         console.log('[task assign] Blocked assignment - user has restricted designation:', assignee.designation)

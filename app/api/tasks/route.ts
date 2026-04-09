@@ -20,27 +20,28 @@ async function hydrateTaskAssignees(adminClient: any, rows: Record<string, unkno
   const ids = [...new Set(rows.map((t) => t.assignee_id as string | null).filter(Boolean))] as string[]
   if (ids.length === 0) return
 
-  const merge = (
-    people: { id: string; full_name?: string | null; email?: string | null }[] | null | undefined,
-  ) => {
-    const byId = new Map(
-      (people || []).map((p) => [p.id, { full_name: p.full_name ?? null, email: String(p.email || '') }]),
-    )
-    for (const t of rows) {
-      const aid = t.assignee_id as string | undefined
-      if (aid && byId.has(aid) && !(t as any).assignee) {
-        ;(t as any).assignee = byId.get(aid)
-      }
+  // Build a lookup map from team + users tables
+  const byId = new Map<string, { full_name: string | null; email: string }>()
+
+  const teamRes = await adminClient.from('team').select('id, full_name, email').in('id', ids)
+  for (const p of (teamRes.data || []) as any[]) {
+    byId.set(p.id, { full_name: p.full_name ?? null, email: String(p.email || '') })
+  }
+
+  const missingFromTeam = ids.filter((id) => !byId.has(id))
+  if (missingFromTeam.length > 0) {
+    const usersRes = await adminClient.from('users').select('id, full_name, email').in('id', missingFromTeam)
+    for (const p of (usersRes.data || []) as any[]) {
+      byId.set(p.id, { full_name: p.full_name ?? null, email: String(p.email || '') })
     }
   }
 
-  const teamRes = await adminClient.from('team').select('id, full_name, email').in('id', ids)
-  merge(teamRes.data as any)
-
-  const missing = ids.filter((id) => rows.some((t) => t.assignee_id === id && !(t as any).assignee))
-  if (missing.length > 0) {
-    const usersRes = await adminClient.from('users').select('id, full_name, email').in('id', missing)
-    merge(usersRes.data as any)
+  // Always overwrite assignee field from our lookup (FK join may have returned null)
+  for (const t of rows) {
+    const aid = t.assignee_id as string | undefined
+    if (aid && byId.has(aid)) {
+      ;(t as any).assignee = byId.get(aid)
+    }
   }
 }
 
@@ -150,7 +151,7 @@ export async function GET() {
       } else {
         list = list.filter((u) => u.id === userId)
       }
-      list = await filterPeopleToAssignableTaskRoles(adminClient, list)
+      // Show all active team members (role validation happens at assignment time)
       assignees = list
         .map((u) => ({ id: u.id, full_name: u.full_name, email: u.email || '' }))
         .sort((a, b) => String(a.full_name || a.email).localeCompare(String(b.full_name || b.email)))
@@ -270,18 +271,7 @@ export async function POST(request: NextRequest) {
       assigneeIdRaw === null || assigneeIdRaw === undefined || assigneeIdRaw === ''
         ? ''
         : String(assigneeIdRaw).trim()
-    if (assigneeId) {
-      const resolved = await resolveAssignmentPersonRole(adminClient, assigneeId)
-      if (!isAssignableTaskRole(resolved)) {
-        return NextResponse.json(
-          {
-            error:
-              'Tasks can only be assigned to team leads and team members (not managers or administrators).',
-          },
-          { status: 403 },
-        )
-      }
-    }
+    // Assignee validation (allow any active team member)
 
     const base = {
       title,

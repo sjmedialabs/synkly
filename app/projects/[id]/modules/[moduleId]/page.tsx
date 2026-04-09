@@ -59,6 +59,12 @@ export default function ProjectModuleDetailPage() {
   const [creatingTask, setCreatingTask] = useState(false)
   const [editingTask, setEditingTask] = useState(false)
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null)
+  const [showNewSprintInput, setShowNewSprintInput] = useState(false)
+  const [newSprintName, setNewSprintName] = useState('')
+  const [creatingSprint, setCreatingSprint] = useState(false)
+  const [taskAttachments, setTaskAttachments] = useState<File[]>([])
+  const [taskLinks, setTaskLinks] = useState<string[]>([])
+  const [newLink, setNewLink] = useState('')
   const [newTask, setNewTask] = useState({
     title: '',
     description: '',
@@ -179,7 +185,7 @@ export default function ProjectModuleDetailPage() {
 
       const [sprintsRes, assignableRes] = await Promise.all([
         fetch(`/api/sprints?project_id=${moduleData.project_id}`),
-        fetch(`/api/team/assignable-users?project_id=${encodeURIComponent(moduleData.project_id)}`),
+        fetch(`/api/team/assignable-users?project_id=${encodeURIComponent(moduleData.project_id)}&all=true`),
       ])
 
       setModule(moduleData)
@@ -252,7 +258,7 @@ export default function ProjectModuleDetailPage() {
 
   const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!newTask.title.trim() || !newTask.sprint_id || !module) return
+    if (!newTask.title.trim() || !module) return
     setCreatingTask(true)
     try {
       const response = await fetch('/api/tasks', {
@@ -276,8 +282,14 @@ export default function ProjectModuleDetailPage() {
         throw new Error(result?.error || 'Failed to create task')
       }
 
+      if (result.task?.id && (taskAttachments.length > 0 || taskLinks.length > 0)) {
+        await uploadAttachments(result.task.id)
+      }
       await fetchTasks()
       setShowCreateTaskModal(false)
+      setTaskAttachments([])
+      setTaskLinks([])
+      setNewLink('')
       setNewTask({
         title: '',
         description: '',
@@ -291,6 +303,64 @@ export default function ProjectModuleDetailPage() {
       alert(`Error creating task: ${err.message}`)
     } finally {
       setCreatingTask(false)
+    }
+  }
+
+  const handleCreateSprint = async () => {
+    if (!newSprintName.trim() || !module) return
+    setCreatingSprint(true)
+    try {
+      const res = await fetch('/api/sprints', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newSprintName.trim(),
+          project_id: module.project_id,
+          status: 'active',
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Failed to create sprint')
+      const sprint = data.sprint
+      const newSprint = { id: sprint.id, name: sprint.name || newSprintName.trim() }
+      setSprints((prev) => [...prev, newSprint])
+      setNewTask((prev) => ({ ...prev, sprint_id: sprint.id }))
+      setNewSprintName('')
+      setShowNewSprintInput(false)
+    } catch (err: any) {
+      alert('Error creating sprint: ' + err.message)
+    } finally {
+      setCreatingSprint(false)
+    }
+  }
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || [])
+    setTaskAttachments((prev) => [...prev, ...files])
+    e.target.value = ''
+  }
+
+  const handleAddLink = () => {
+    const url = newLink.trim()
+    if (!url) return
+    setTaskLinks((prev) => [...prev, url])
+    setNewLink('')
+  }
+
+  const uploadAttachments = async (taskId: string) => {
+    for (const file of taskAttachments) {
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('entity_type', 'task')
+      formData.append('entity_id', taskId)
+      await fetch('/api/attachments', { method: 'POST', body: formData })
+    }
+    for (const url of taskLinks) {
+      await fetch('/api/attachments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entity_type: 'task', entity_id: taskId, url }),
+      })
     }
   }
 
@@ -455,19 +525,41 @@ export default function ProjectModuleDetailPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm mb-2">Sprint *</label>
-                  <select
-                    required
-                    disabled={sprints.length === 0}
-                    value={newTask.sprint_id}
-                    onChange={(e) => setNewTask({ ...newTask, sprint_id: e.target.value })}
-                    className="w-full px-4 py-2 border border-input rounded-lg bg-background"
-                  >
-                    <option value="">{sprints.length === 0 ? 'No sprints available' : 'Select sprint'}</option>
-                    {sprints.map((sprint) => (
-                      <option key={sprint.id} value={sprint.id}>{sprint.name}</option>
-                    ))}
-                  </select>
+                  <label className="block text-sm mb-2">Sprint</label>
+                  {showNewSprintInput ? (
+                    <div className="flex gap-2">
+                      <input
+                        value={newSprintName}
+                        onChange={(e) => setNewSprintName(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleCreateSprint())}
+                        placeholder="Sprint name..."
+                        className="flex-1 px-4 py-2 border border-input rounded-lg bg-background text-sm"
+                        autoFocus
+                      />
+                      <Button type="button" size="sm" onClick={handleCreateSprint} disabled={creatingSprint || !newSprintName.trim()}>
+                        {creatingSprint ? '...' : 'Add'}
+                      </Button>
+                      <Button type="button" size="sm" variant="outline" onClick={() => setShowNewSprintInput(false)}>
+                        ✕
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2">
+                      <select
+                        value={newTask.sprint_id}
+                        onChange={(e) => setNewTask({ ...newTask, sprint_id: e.target.value })}
+                        className="flex-1 px-4 py-2 border border-input rounded-lg bg-background"
+                      >
+                        <option value="">{sprints.length === 0 ? 'No sprints yet' : 'Select sprint (optional)'}</option>
+                        {sprints.map((sprint) => (
+                          <option key={sprint.id} value={sprint.id}>{sprint.name}</option>
+                        ))}
+                      </select>
+                      <Button type="button" size="sm" variant="outline" onClick={() => setShowNewSprintInput(true)} title="Create new sprint">
+                        <Plus className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm mb-2">Assignee</label>

@@ -7,6 +7,7 @@ import {
   provisionClientForClientAdminIfMissing,
   upsertClientRowForFk,
 } from '@/lib/rbac-server'
+import { getAccessibleProjectSummaries } from '@/lib/projects-access'
 import { NextRequest } from 'next/server'
 
 function isMissingProjectsTable(err: { code?: string; message?: string } | null) {
@@ -114,6 +115,14 @@ export async function GET() {
           return NextResponse.json({ error: error.message }, { status: 500 })
         }
         projects = data || []
+      } else {
+        // Fallback: fetch projects the manager is explicitly associated with
+        const summaries = await getAccessibleProjectSummaries(ctx)
+        const pids = summaries.map((s) => s.id)
+        if (pids.length > 0) {
+          const { data } = await fetchProjectsList((q) => q.in('id', pids))
+          projects = data || []
+        }
       }
     } else if (role === 'team_lead') {
       // Team lead sees projects they lead or are assigned to

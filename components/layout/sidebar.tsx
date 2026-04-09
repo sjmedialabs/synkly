@@ -24,6 +24,7 @@ import {
   ChevronRight,
   Shield,
   Briefcase,
+  Upload,
 } from 'lucide-react'
 
 interface UserWithRole {
@@ -65,6 +66,7 @@ const menuConfig: Record<RoleKey, MenuItem[]> = {
     { label: 'Team Management', href: '/team', icon: UsersRound },
     { label: 'Projects', href: '/projects', icon: FolderKanban },
     { label: 'Tasks', href: '/tasks', icon: CheckSquare },
+    { label: 'Bulk Upload Tasks', href: '/tasks/bulk-upload', icon: Upload },
     { label: 'Milestones', href: '/milestones', icon: Milestone },
     { label: 'Sprints', href: '/sprints', icon: Target },
     { label: 'Capacity', href: '/capacity', icon: Clock },
@@ -84,6 +86,7 @@ const menuConfig: Record<RoleKey, MenuItem[]> = {
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { label: 'Projects', href: '/projects', icon: FolderKanban },
     { label: 'Tasks', href: '/tasks', icon: CheckSquare },
+    { label: 'Bulk Upload Tasks', href: '/tasks/bulk-upload', icon: Upload },
     { label: 'Team', href: '/team', icon: UsersRound },
     { label: 'Capacity', href: '/capacity', icon: Clock },
     { label: 'Utilization', href: '/utilization', icon: PieChart },

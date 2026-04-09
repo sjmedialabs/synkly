@@ -233,7 +233,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const redirectTo = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/set-password`
+    const redirectTo = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/callback?next=/auth/set-password&type=invite`
     const inviteMetadata = {
       full_name,
       role,

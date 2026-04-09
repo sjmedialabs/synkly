@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { can, canAccessAll, getAuthContext } from '@/lib/rbac-server'
+import { canAccessClientScope } from '@/lib/rbac'
 import {
   filterPeopleToAssignableTaskRoles,
   type AssignmentPersonRow,
@@ -12,17 +13,18 @@ export async function GET(request: NextRequest) {
   try {
     const ctx = await getAuthContext()
     if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    if (!canAccessAll(ctx.role) && !can(ctx.role, 'ASSIGN_TASK')) {
+    if (!canAccessAll(ctx.role) && !canAccessClientScope(ctx.role) && !can(ctx.role, 'ASSIGN_TASK')) {
       return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
     }
 
     const searchParams = request.nextUrl.searchParams
     const projectId = searchParams.get('project_id')
+    const showAll = searchParams.get('all') === 'true'
 
     const admin = ctx.adminClient
     const { data: allUsers, error: usersError } = await admin
       .from('team')
-      .select('id, email, full_name, designation, department, reporting_manager_id, is_active')
+      .select('id, email, full_name, designation, department, reporting_manager_id, is_active, client_id')
       .eq('is_active', true)
       .order('full_name', { ascending: true })
 
@@ -36,8 +38,17 @@ export async function GET(request: NextRequest) {
     })
 
     let finalUsers = assignableUsers
-    if (!canAccessAll(ctx.role)) {
+    if (canAccessAll(ctx.role) || canAccessClientScope(ctx.role)) {
+      // Admin and manager: see all users in their client scope
+      if (ctx.clientId) {
+        finalUsers = finalUsers.filter((u: any) => !u.client_id || u.client_id === ctx.clientId)
+      }
+    } else if (ctx.role === 'team_lead') {
+      // Team lead: only direct reports
       finalUsers = finalUsers.filter((u) => u.reporting_manager_id === ctx.userId)
+    } else {
+      // Members: only themselves
+      finalUsers = finalUsers.filter((u) => u.id === ctx.userId)
     }
 
     if (projectId) {
@@ -52,19 +63,22 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const asRows: AssignmentPersonRow[] = finalUsers.map((u: any) => ({
-      id: u.id,
-      email: String(u.email || ''),
-      full_name: u.full_name ?? null,
-      designation: u.designation ?? null,
-      department: u.department ?? null,
-      experience_years: null,
-      reporting_manager_id: u.reporting_manager_id ?? null,
-      client_id: u.client_id ?? null,
-    }))
-    const roleFiltered = await filterPeopleToAssignableTaskRoles(admin, asRows)
-    const allowedIds = new Set(roleFiltered.map((r) => r.id))
-    finalUsers = finalUsers.filter((u) => allowedIds.has(u.id))
+    // When all=true, skip strict role filtering (for create task form)
+    if (!showAll) {
+      const asRows: AssignmentPersonRow[] = finalUsers.map((u: any) => ({
+        id: u.id,
+        email: String(u.email || ''),
+        full_name: u.full_name ?? null,
+        designation: u.designation ?? null,
+        department: u.department ?? null,
+        experience_years: null,
+        reporting_manager_id: u.reporting_manager_id ?? null,
+        client_id: u.client_id ?? null,
+      }))
+      const roleFiltered = await filterPeopleToAssignableTaskRoles(admin, asRows)
+      const allowedIds = new Set(roleFiltered.map((r) => r.id))
+      finalUsers = finalUsers.filter((u) => allowedIds.has(u.id))
+    }
 
     return NextResponse.json({
       users: finalUsers,

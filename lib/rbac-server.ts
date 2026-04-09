@@ -8,6 +8,7 @@ import {
   isAdminRole,
   canManageProjects,
   canAssignTasks,
+  canAccessClientScope,
   resolveRole,
   normalizeRole,
 } from '@/lib/rbac'

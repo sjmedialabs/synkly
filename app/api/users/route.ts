@@ -145,7 +145,7 @@ export async function POST(request: NextRequest) {
     // Send invite email if no password was provided
     if (!password) {
       await adminClient.auth.admin.inviteUserByEmail(email, {
-        redirectTo: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/set-password`,
+        redirectTo: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/callback?next=/auth/set-password&type=invite`,
       })
     }
     
