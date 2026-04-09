@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthContext } from '@/lib/rbac-server'
+import { longCacheHeaders, masterDataCache } from '@/lib/cache'
 
 export async function GET() {
   try {

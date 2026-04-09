@@ -239,7 +239,7 @@ export function Sidebar() {
                     const isChildActive = pathname === child.href || pathname.startsWith(child.href + '/')
                     return (
                       <Link
-                        key={child.href}
+                        key={`${item.href}:${child.href}:${child.label}`}
                         href={child.href}
                         className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
                           isChildActive
