@@ -40,9 +40,15 @@ export function OrgHierarchyManager() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [newItemName, setNewItemName] = useState('')
-  const [addingTo, setAddingTo] = useState<{ type: 'department' | 'designation'; parentId?: string } | null>(null)
+  const [addingTo, setAddingTo] = useState<{ type: 'department' } | null>(null)
   const [saving, setSaving] = useState(false)
   const [assigningDept, setAssigningDept] = useState<string | null>(null)
+  const [assigningDivision, setAssigningDivision] = useState<string | null>(null)
+  const uniqueById = <T extends { id: string }>(arr: T[]): T[] => {
+    const m = new Map<string, T>()
+    for (const a of arr) m.set(a.id, a)
+    return [...m.values()]
+  }
 
   useEffect(() => {
     loadAll()
@@ -60,15 +66,15 @@ export function OrgHierarchyManager() {
 
       if (deptRes.ok) {
         const d = await deptRes.json()
-        setDepartments((d.values || []).filter((v: any) => v?.id && v?.name))
+        setDepartments(uniqueById((d.values || []).filter((v: any) => v?.id && v?.name)))
       }
       if (divRes.ok) {
         const d = await divRes.json()
-        setDivisions((d.values || []).filter((v: any) => v?.id && v?.name))
+        setDivisions(uniqueById((d.values || []).filter((v: any) => v?.id && v?.name)))
       }
       if (desigRes.ok) {
         const d = await desigRes.json()
-        setDesignations((d.values || []).filter((v: any) => v?.id && v?.name))
+        setDesignations(uniqueById((d.values || []).filter((v: any) => v?.id && v?.name)))
       }
       if (rolesRes.ok) {
         const d = await rolesRes.json()
@@ -149,15 +155,14 @@ export function OrgHierarchyManager() {
         body: JSON.stringify({
           type: addingTo.type,
           name: newItemName.trim(),
-          parent_id: addingTo.parentId || null,
+          parent_id: null,
         }),
       })
       if (!res.ok) throw new Error((await res.json()).error || 'Failed to add')
       const data = await res.json()
-      const newVal = data.value || { id: data.id, name: newItemName.trim(), parent_id: addingTo.parentId || null, is_active: true }
+      const newVal = data.value || { id: data.id, name: newItemName.trim(), parent_id: null, is_active: true }
 
       if (addingTo.type === 'department') setDepartments((prev) => [...prev, newVal])
-      else setDesignations((prev) => [...prev, newVal])
 
       setNewItemName('')
       setAddingTo(null)
@@ -193,8 +198,49 @@ export function OrgHierarchyManager() {
       const data = await res.json()
       setDesignationRoleMappings((prev) => {
         const filtered = prev.filter((m) => m.designation_id !== designationId)
-        return [...filtered, data.mapping]
+        return uniqueById([...filtered, data.mapping])
       })
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
+  async function handleAssignDesignation(divisionId: string, designationId: string) {
+    if (!designationId) return
+    setError(null)
+    setSaving(true)
+    try {
+      const setRes = await fetch('/api/master-data/values', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: designationId, parent_id: divisionId }),
+      })
+      if (!setRes.ok) throw new Error((await setRes.json()).error || 'Failed to assign designation')
+
+      setDesignations((prev) =>
+        prev.map((d) => {
+          if (d.id === designationId) return { ...d, parent_id: divisionId }
+          return d
+        }),
+      )
+      setAssigningDivision(null)
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleUnassignDesignation(designationId: string) {
+    setError(null)
+    try {
+      const res = await fetch('/api/master-data/values', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: designationId, parent_id: null }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error || 'Failed to unassign designation')
+      setDesignations((prev) => prev.map((d) => (d.id === designationId ? { ...d, parent_id: null } : d)))
     } catch (err: any) {
       setError(err.message)
     }
@@ -222,7 +268,7 @@ export function OrgHierarchyManager() {
             <div>
               <CardTitle className="text-lg">Organization Hierarchy</CardTitle>
               <CardDescription>
-                Manage Departments → Divisions → Designations and map designations to roles
+                Manage Departments {'->'} Divisions {'->'} Assign multiple designations per division {'->'} map to role
               </CardDescription>
             </div>
             <Button
@@ -365,15 +411,34 @@ export function OrgHierarchyManager() {
                                   <span className="text-xs text-muted-foreground mr-2">
                                     {divDesignations.length} designation{divDesignations.length !== 1 ? 's' : ''}
                                   </span>
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    className="h-6 text-xs"
-                                    onClick={() => setAddingTo({ type: 'designation', parentId: div.id })}
+                                  <Popover
+                                    open={assigningDivision === div.id}
+                                    onOpenChange={(open) => setAssigningDivision(open ? div.id : null)}
                                   >
-                                    <Plus className="w-3 h-3 mr-1" />
-                                    Designation
-                                  </Button>
+                                    <PopoverTrigger asChild>
+                                      <Button size="sm" variant="ghost" className="h-6 text-xs" disabled={saving}>
+                                        <Plus className="w-3 h-3 mr-1" />
+                                        Assign Designation
+                                      </Button>
+                                    </PopoverTrigger>
+                                    <PopoverContent className="w-72 p-2" align="end">
+                                      <p className="text-xs text-muted-foreground mb-2">
+                                        Select a designation to assign to {div.name}
+                                      </p>
+                                      <select
+                                        defaultValue=""
+                                        onChange={(e) => handleAssignDesignation(div.id, e.target.value)}
+                                        className="w-full text-xs px-2 py-1 border border-input rounded bg-background text-foreground"
+                                      >
+                                        <option value="">Select designation...</option>
+                                        {designations.map((desig) => (
+                                          <option key={desig.id} value={desig.id}>
+                                            {desig.name}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </PopoverContent>
+                                  </Popover>
                                   <button
                                     type="button"
                                     onClick={() => handleToggleDivision(div.id, dept.id, false)}
@@ -388,7 +453,9 @@ export function OrgHierarchyManager() {
                                 {isDivExpanded && (
                                   <div className="ml-6 border-l border-border">
                                     {divDesignations.length === 0 ? (
-                                      <div className="px-4 py-2 text-xs text-muted-foreground">No designations</div>
+                                      <div className="px-4 py-2 text-xs text-muted-foreground">
+                                        No designation assigned. Use "Assign Designation".
+                                      </div>
                                     ) : (
                                       divDesignations.map((desig) => {
                                         const mapping = getRoleForDesignation(desig.id)
@@ -404,8 +471,8 @@ export function OrgHierarchyManager() {
                                                 className="text-xs px-2 py-1 border border-input rounded bg-background text-foreground"
                                               >
                                                 <option value="">Map to role...</option>
-                                                {roles.map((r) => (
-                                                  <option key={r.id} value={r.id}>
+                                                {uniqueById(roles).map((r) => (
+                                                  <option key={`${r.id}:${r.name}`} value={r.id}>
                                                     {formatName(r.name)}
                                                   </option>
                                                 ))}
@@ -413,8 +480,9 @@ export function OrgHierarchyManager() {
                                             </div>
                                             <button
                                               type="button"
-                                              onClick={() => handleDelete('designation', desig.id)}
+                                              onClick={() => handleUnassignDesignation(desig.id)}
                                               className="p-1 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive"
+                                              title="Unassign designation from division"
                                             >
                                               <Trash2 className="w-3 h-3" />
                                             </button>

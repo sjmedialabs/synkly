@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { Plus, Trash2 } from 'lucide-react'
+import { Check, Pencil, Plus, Trash2, X } from 'lucide-react'
 
 type MasterDataType = {
   id: string
@@ -31,6 +31,8 @@ export function MasterDataManager() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [editingValueId, setEditingValueId] = useState<string | null>(null)
+  const [editingValueName, setEditingValueName] = useState('')
 
   useEffect(() => {
     async function loadTypes() {
@@ -110,6 +112,52 @@ export function MasterDataManager() {
     } catch (err) {
       console.error('[master-data] Failed to add value:', err)
       setError(err instanceof Error ? err.message : 'Failed to add value')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const startEdit = (value: MasterDataValue) => {
+    setEditingValueId(value.id)
+    setEditingValueName(value.name || '')
+    setError(null)
+  }
+
+  const cancelEdit = () => {
+    setEditingValueId(null)
+    setEditingValueName('')
+  }
+
+  const handleSaveEdit = async () => {
+    if (!editingValueId) return
+    const trimmed = editingValueName.trim()
+    if (!trimmed) {
+      setError('Value name cannot be empty')
+      return
+    }
+    setSaving(true)
+    try {
+      const res = await fetch('/api/master-data/values', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: editingValueId, name: trimmed }),
+      })
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}))
+        throw new Error(errData?.error || 'Failed to update value')
+      }
+      const data = await res.json()
+      const updated = data?.value
+      if (updated?.id) {
+        setValues((prev) =>
+          prev.map((v) => (v.id === updated.id ? { ...v, name: updated.name ?? v.name } : v)),
+        )
+      }
+      cancelEdit()
+      setError(null)
+    } catch (err) {
+      console.error('[master-data] Failed to edit value:', err)
+      setError(err instanceof Error ? err.message : 'Failed to update value')
     } finally {
       setSaving(false)
     }
@@ -202,37 +250,85 @@ export function MasterDataManager() {
                       key={value.id}
                       className="flex items-center justify-between p-3 rounded-lg bg-muted/50 border border-border"
                     >
-                      <span className="text-sm font-medium text-foreground">{value.name || 'Unnamed'}</span>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          try {
-                            setError(null)
-                            const res = await fetch(`/api/master-data/values?id=${encodeURIComponent(value.id)}`, {
-                              method: 'DELETE',
-                            })
-                            if (!res.ok) {
-                              let msg = 'Failed to delete value'
-                              try {
-                                const errData = await res.json()
-                                if (errData?.error) msg = String(errData.error)
-                              } catch {
-                                /* ignore */
+                      {editingValueId === value.id ? (
+                        <Input
+                          value={editingValueName}
+                          onChange={(e) => setEditingValueName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleSaveEdit()
+                            if (e.key === 'Escape') cancelEdit()
+                          }}
+                          disabled={saving}
+                          className="h-8 mr-2"
+                          autoFocus
+                        />
+                      ) : (
+                        <span className="text-sm font-medium text-foreground">{value.name || 'Unnamed'}</span>
+                      )}
+                      <div className="flex items-center gap-1">
+                        {editingValueId === value.id ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={handleSaveEdit}
+                              disabled={saving || !editingValueName.trim()}
+                              className="p-1 hover:bg-emerald-100 rounded text-muted-foreground hover:text-emerald-700 transition-colors disabled:opacity-50"
+                              title="Save"
+                            >
+                              <Check className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={cancelEdit}
+                              disabled={saving}
+                              className="p-1 hover:bg-muted rounded text-muted-foreground hover:text-foreground transition-colors"
+                              title="Cancel"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => startEdit(value)}
+                            className="p-1 hover:bg-primary/10 rounded text-muted-foreground hover:text-primary transition-colors"
+                            title="Edit"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              setError(null)
+                              const res = await fetch(`/api/master-data/values?id=${encodeURIComponent(value.id)}`, {
+                                method: 'DELETE',
+                              })
+                              if (!res.ok) {
+                                let msg = 'Failed to delete value'
+                                try {
+                                  const errData = await res.json()
+                                  if (errData?.error) msg = String(errData.error)
+                                } catch {
+                                  /* ignore */
+                                }
+                                setError(msg)
+                                return
                               }
-                              setError(msg)
-                              return
+                              setValues((prev) => prev.filter((v) => v.id !== value.id))
+                              if (editingValueId === value.id) cancelEdit()
+                            } catch (err) {
+                              console.error('[master-data] Failed to delete value:', err)
+                              setError(err instanceof Error ? err.message : 'Failed to delete value')
                             }
-                            setValues((prev) => prev.filter((v) => v.id !== value.id))
-                          } catch (err) {
-                            console.error('[master-data] Failed to delete value:', err)
-                            setError(err instanceof Error ? err.message : 'Failed to delete value')
-                          }
-                        }}
-                        className="p-1 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive transition-colors"
-                        title="Delete"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                          }}
+                          className="p-1 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive transition-colors"
+                          title="Delete"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>

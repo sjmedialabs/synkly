@@ -28,7 +28,11 @@ export async function GET(request: NextRequest) {
     if (error) {
       // Table may not exist yet
       if (error.code === 'PGRST205' || error.message?.includes('does not exist')) {
-        return NextResponse.json({ mappings: [] })
+        return NextResponse.json({
+          mappings: [],
+          warning:
+            'designation_roles table is missing. Run scripts/024_ensure_designation_roles_table.sql (or scripts/022_rbac_org_hierarchy.sql).',
+        })
       }
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
@@ -58,12 +62,24 @@ export async function POST(request: NextRequest) {
     const clientId = ctx.isMasterAdmin ? (body.client_id || null) : ctx.clientId
 
     // Upsert: update if mapping exists for this designation+client, else insert
-    const { data: existing } = await ctx.adminClient
+    let existingQuery = ctx.adminClient
       .from('designation_roles')
       .select('id')
       .eq('designation_id', designationId)
-      .eq('client_id', clientId || '')
-      .maybeSingle()
+    existingQuery = clientId ? existingQuery.eq('client_id', clientId) : existingQuery.is('client_id', null)
+    const { data: existing, error: existingErr } = await existingQuery.maybeSingle()
+    if (existingErr) {
+      if (existingErr.code === 'PGRST205' || existingErr.message?.includes('does not exist')) {
+        return NextResponse.json(
+          {
+            error:
+              'designation_roles table is missing. Run scripts/024_ensure_designation_roles_table.sql in Supabase SQL Editor.',
+          },
+          { status: 503 },
+        )
+      }
+      return NextResponse.json({ error: existingErr.message }, { status: 500 })
+    }
 
     let result
     if (existing?.id) {
@@ -85,7 +101,18 @@ export async function POST(request: NextRequest) {
         .single()
     }
 
-    if (result.error) return NextResponse.json({ error: result.error.message }, { status: 500 })
+    if (result.error) {
+      if (result.error.code === 'PGRST205' || result.error.message?.includes('does not exist')) {
+        return NextResponse.json(
+          {
+            error:
+              'designation_roles table is missing. Run scripts/024_ensure_designation_roles_table.sql in Supabase SQL Editor.',
+          },
+          { status: 503 },
+        )
+      }
+      return NextResponse.json({ error: result.error.message }, { status: 500 })
+    }
     return NextResponse.json({ mapping: result.data }, { status: existing?.id ? 200 : 201 })
   } catch (e) {
     console.error('[designation-roles API] POST:', e)
@@ -105,6 +132,15 @@ export async function DELETE(request: NextRequest) {
     if (!id) return NextResponse.json({ error: 'Mapping ID is required' }, { status: 400 })
 
     const { error } = await ctx.adminClient.from('designation_roles').delete().eq('id', id)
+    if (error && (error.code === 'PGRST205' || error.message?.includes('does not exist'))) {
+      return NextResponse.json(
+        {
+          error:
+            'designation_roles table is missing. Run scripts/024_ensure_designation_roles_table.sql in Supabase SQL Editor.',
+        },
+        { status: 503 },
+      )
+    }
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     return NextResponse.json({ success: true })
   } catch (e) {

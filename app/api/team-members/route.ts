@@ -149,7 +149,7 @@ export async function POST(request: NextRequest) {
     const designation = String(body.designation || '').trim()
     const designation_id = body.designation_id ? String(body.designation_id) : null
     const reporting_manager_id = body.reporting_manager_id ? String(body.reporting_manager_id) : null
-    const role = String(body.role || '').trim().toLowerCase() as RoleKey
+    let role = String(body.role || '').trim().toLowerCase() as RoleKey
     const password = body.password ? String(body.password) : ''
     const experience_years = Number(body.experience_years ?? 0)
     const skills = Array.isArray(body.skills)
@@ -162,35 +162,47 @@ export async function POST(request: NextRequest) {
     if (!email || !emailRegex.test(email)) {
       return NextResponse.json({ error: 'Valid email is required' }, { status: 400 })
     }
-    if (!full_name || !department || !designation || !role) {
+    if (!full_name || !department || !designation) {
       return NextResponse.json(
-        { error: 'full_name, department, designation and role are required' },
+        { error: 'full_name, department and designation are required' },
         { status: 400 },
       )
     }
-    if (!(role in ROLE_LABELS)) {
-      // If role not provided but designation_id is, try auto-assign from designation_roles
-      if (designation_id && !role) {
-        try {
-          const { data: mapping } = await adminClient
-            .from('designation_roles')
-            .select('role_id, roles (name)')
-            .eq('designation_id', designation_id)
-            .maybeSingle()
-          if (mapping?.roles && typeof (mapping.roles as any).name === 'string') {
-            const autoRole = (mapping.roles as any).name as string
-            if (autoRole in ROLE_LABELS) {
-              // Use the mapped role - reassign for downstream logic
-              ;(body as any).role = autoRole
-            }
+    if (designation_id) {
+      try {
+        const { data: mapping } = await adminClient
+          .from('designation_roles')
+          .select('role_id, roles (name)')
+          .eq('designation_id', designation_id)
+          .maybeSingle()
+        if (mapping?.roles && typeof (mapping.roles as any).name === 'string') {
+          const mappedRole = String((mapping.roles as any).name).trim().toLowerCase()
+          if (mappedRole in ROLE_LABELS) {
+            role = mappedRole as RoleKey
           }
-        } catch {}
+        }
+      } catch {}
+    }
+    if (!role && designation_id) {
+      const { error: mappingTableErr } = await adminClient
+        .from('designation_roles')
+        .select('id')
+        .limit(1)
+      if (mappingTableErr && (mappingTableErr.code === 'PGRST205' || mappingTableErr.message?.includes('does not exist'))) {
+        return NextResponse.json(
+          {
+            error:
+              'designation_roles table is missing. Run scripts/024_ensure_designation_roles_table.sql in Supabase SQL Editor.',
+          },
+          { status: 503 },
+        )
       }
-      // Re-check after auto-assignment attempt
-      const finalRole = String((body as any).role || role || '').trim().toLowerCase()
-      if (!(finalRole in ROLE_LABELS)) {
-        return NextResponse.json({ error: 'Invalid role selected' }, { status: 400 })
-      }
+    }
+    if (!(role in ROLE_LABELS)) {
+      return NextResponse.json(
+        { error: 'Selected designation is not mapped to a valid role. Map designation to role in Settings first.' },
+        { status: 400 },
+      )
     }
     if (!Number.isFinite(experience_years) || experience_years < 0 || experience_years > 50) {
       return NextResponse.json({ error: 'experience_years must be between 0 and 50' }, { status: 400 })

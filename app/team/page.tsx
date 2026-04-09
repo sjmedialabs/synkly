@@ -52,13 +52,6 @@ const experienceLevels = [
 ]
 
 const RESTRICTED_DESIGNATIONS = ['Client Admin', 'Super Admin', 'Delivery Manager']
-const ROLE_OPTIONS = [
-  { value: 'client_admin', label: 'Client Admin' },
-  { value: 'manager', label: 'Manager' },
-  { value: 'team_lead', label: 'Team Lead' },
-  { value: 'member', label: 'Member' },
-] as const
-
 const roleLevel: Record<string, number> = {
   member: 1,
   team_lead: 2,
@@ -281,7 +274,10 @@ export default function TeamPage() {
 
   // Auto-role from designation: when designation changes, look up the mapped role
   useEffect(() => {
-    if (!formData.designation_id) return
+    if (!formData.designation_id) {
+      setFormData((prev) => ({ ...prev, role: '' }))
+      return
+    }
     async function fetchMappedRole() {
       try {
         const res = await fetch(`/api/designation-roles?designation_id=${formData.designation_id}`)
@@ -290,6 +286,8 @@ export default function TeamPage() {
         const mapping = (data.mappings || [])[0]
         if (mapping?.roles?.name) {
           setFormData((prev) => ({ ...prev, role: mapping.roles.name }))
+        } else {
+          setFormData((prev) => ({ ...prev, role: '' }))
         }
       } catch {}
     }
@@ -379,7 +377,7 @@ export default function TeamPage() {
     if (!formData.full_name.trim()) errors.full_name = 'Full name is required'
     if (!formData.department_id) errors.department_id = 'Department is required'
     if (!formData.designation_id) errors.designation_id = 'Designation is required'
-    if (!formData.role) errors.role = 'Role is required'
+    if (!formData.role) errors.designation_id = 'Selected designation is not mapped to a role'
     if (formData.password && formData.password.length < 8) errors.password = 'Password must be at least 8 characters'
     if (formData.password && formData.password !== formData.confirm_password) {
       errors.confirm_password = 'Passwords do not match'
@@ -428,7 +426,6 @@ export default function TeamPage() {
           experience_years: formData.experience_years ? parseInt(formData.experience_years) : null,
           skills: formData.skillset ? formData.skillset.split(',').map(s => s.trim()).filter(Boolean) : [],
           reporting_manager_id: formData.reporting_manager_id || null,
-          role: formData.role,
           password: formData.password || undefined,
         }),
       })
@@ -866,6 +863,9 @@ export default function TeamPage() {
                         department_id: e.target.value,
                         department: selected?.name || '',
                         division_id: '',
+                        designation_id: '',
+                        designation: '',
+                        role: '',
                       })
                     }}
                     className="w-full px-4 py-2 border border-input rounded-lg bg-background text-foreground"
@@ -883,7 +883,15 @@ export default function TeamPage() {
                   </label>
                   <select
                     value={formData.division_id}
-                    onChange={(e) => setFormData({ ...formData, division_id: e.target.value })}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        division_id: e.target.value,
+                        designation_id: '',
+                        designation: '',
+                        role: '',
+                      })
+                    }
                     className="w-full px-4 py-2 border border-input rounded-lg bg-background text-foreground"
                   >
                     <option value="">Select Division</option>
@@ -918,20 +926,15 @@ export default function TeamPage() {
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-2">
-                    Role *
+                    Role (from designation)
                   </label>
-                  <select
-                    required
-                    value={formData.role}
-                    onChange={(e) => setFormData({ ...formData, role: e.target.value, reporting_manager_id: '' })}
-                    className="w-full px-4 py-2 border border-input rounded-lg bg-background text-foreground"
-                  >
-                    <option value="">Search/Select Role</option>
-                    {ROLE_OPTIONS.map((role) => (
-                      <option key={role.value} value={role.value}>{role.label}</option>
-                    ))}
-                  </select>
-                  {validationErrors.role && <p className="text-xs text-destructive mt-1">{validationErrors.role}</p>}
+                  <input
+                    type="text"
+                    value={formData.role ? formData.role.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) : ''}
+                    disabled
+                    className="w-full px-4 py-2 border border-input rounded-lg bg-muted text-muted-foreground"
+                    placeholder="Auto-mapped after selecting designation"
+                  />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-2">

@@ -344,17 +344,21 @@ export async function PATCH(request: NextRequest) {
 
     const body = await request.json()
     const { id, parent_id } = body
+    const name =
+      typeof body?.name === 'string' && body.name.trim().length > 0 ? body.name.trim() : undefined
 
     if (!id) {
       return NextResponse.json({ error: 'id is required' }, { status: 400 })
     }
 
     const adminClient = getAdminClient()
+    const updatePayload: Record<string, unknown> = { parent_id: parent_id ?? null }
+    if (name !== undefined) updatePayload.name = name
 
     // Try modern schema first
     const modernUpdate = await adminClient
       .from('master_data_values')
-      .update({ parent_id: parent_id ?? null, updated_at: new Date().toISOString() } as any)
+      .update({ ...updatePayload, updated_at: new Date().toISOString() } as any)
       .eq('id', id)
       .select('id, name, parent_id, is_active')
       .single()
@@ -367,7 +371,7 @@ export async function PATCH(request: NextRequest) {
     // Fallback: try without updated_at
     const legacyUpdate = await adminClient
       .from('master_data_values')
-      .update({ parent_id: parent_id ?? null } as any)
+      .update(updatePayload as any)
       .eq('id', id)
       .select('id, name, parent_id, is_active')
       .single()
