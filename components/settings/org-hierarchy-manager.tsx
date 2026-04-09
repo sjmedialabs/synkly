@@ -4,7 +4,9 @@ import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { Plus, Trash2, ChevronRight, ChevronDown, Building2, Layers, Briefcase, Link2 } from 'lucide-react'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Plus, Trash2, ChevronRight, ChevronDown, Building2, Layers, Briefcase, Link2, Check } from 'lucide-react'
 
 type MasterDataValue = {
   id: string
@@ -38,8 +40,9 @@ export function OrgHierarchyManager() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [newItemName, setNewItemName] = useState('')
-  const [addingTo, setAddingTo] = useState<{ type: 'department' | 'division' | 'designation'; parentId?: string } | null>(null)
+  const [addingTo, setAddingTo] = useState<{ type: 'department' | 'designation'; parentId?: string } | null>(null)
   const [saving, setSaving] = useState(false)
+  const [assigningDept, setAssigningDept] = useState<string | null>(null)
 
   useEffect(() => {
     loadAll()
@@ -103,6 +106,38 @@ export function OrgHierarchyManager() {
     return designationRoleMappings.find((m) => m.designation_id === designationId)
   }
 
+  /** Which department (if any) owns this division? */
+  function getDivisionOwner(divisionId: string): string | null {
+    const div = divisions.find((d) => d.id === divisionId)
+    return div?.parent_id ?? null
+  }
+
+  async function handleToggleDivision(divisionId: string, departmentId: string, checked: boolean) {
+    setError(null)
+    try {
+      const res = await fetch('/api/master-data/values', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: divisionId,
+          parent_id: checked ? departmentId : null,
+        }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error || 'Failed to update')
+      const data = await res.json()
+      const updated = data.value
+
+      // Update local state
+      setDivisions((prev) =>
+        prev.map((d) =>
+          d.id === divisionId ? { ...d, parent_id: checked ? departmentId : null } : d,
+        ),
+      )
+    } catch (err: any) {
+      setError(err.message)
+    }
+  }
+
   async function handleAdd() {
     if (!addingTo || !newItemName.trim()) return
     setSaving(true)
@@ -122,7 +157,6 @@ export function OrgHierarchyManager() {
       const newVal = data.value || { id: data.id, name: newItemName.trim(), parent_id: addingTo.parentId || null, is_active: true }
 
       if (addingTo.type === 'department') setDepartments((prev) => [...prev, newVal])
-      else if (addingTo.type === 'division') setDivisions((prev) => [...prev, newVal])
       else setDesignations((prev) => [...prev, newVal])
 
       setNewItemName('')
@@ -243,15 +277,62 @@ export function OrgHierarchyManager() {
                       <span className="text-xs text-muted-foreground mr-2">
                         {deptDivisions.length} division{deptDivisions.length !== 1 ? 's' : ''}
                       </span>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 text-xs"
-                        onClick={() => setAddingTo({ type: 'division', parentId: dept.id })}
-                      >
-                        <Plus className="w-3 h-3 mr-1" />
-                        Division
-                      </Button>
+
+                      {/* Multi-select divisions popover */}
+                      <Popover open={assigningDept === dept.id} onOpenChange={(open) => setAssigningDept(open ? dept.id : null)}>
+                        <PopoverTrigger asChild>
+                          <Button size="sm" variant="ghost" className="h-7 text-xs">
+                            <Layers className="w-3 h-3 mr-1" />
+                            Assign Divisions
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent className="w-72 p-0" align="end">
+                          <div className="px-3 py-2 border-b border-border">
+                            <p className="text-sm font-medium text-foreground">Assign Divisions</p>
+                            <p className="text-xs text-muted-foreground">Select divisions for {dept.name}</p>
+                          </div>
+                          <div className="max-h-56 overflow-y-auto p-1">
+                            {divisions.length === 0 ? (
+                              <div className="px-3 py-4 text-center">
+                                <p className="text-xs text-muted-foreground">
+                                  No divisions created yet. Add divisions in the Data Types tab first.
+                                </p>
+                              </div>
+                            ) : (
+                              divisions.map((div) => {
+                                const isAssigned = div.parent_id === dept.id
+                                const otherOwner = div.parent_id && div.parent_id !== dept.id
+                                  ? departments.find((d) => d.id === div.parent_id)
+                                  : null
+
+                                return (
+                                  <label
+                                    key={div.id}
+                                    className="flex items-center gap-2 px-3 py-2 rounded-md hover:bg-muted/50 cursor-pointer"
+                                  >
+                                    <Checkbox
+                                      checked={isAssigned}
+                                      onCheckedChange={(checked) =>
+                                        handleToggleDivision(div.id, dept.id, !!checked)
+                                      }
+                                    />
+                                    <span className="text-sm text-foreground flex-1">{div.name}</span>
+                                    {otherOwner && (
+                                      <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                                        {otherOwner.name}
+                                      </span>
+                                    )}
+                                    {isAssigned && (
+                                      <Check className="w-3 h-3 text-emerald-500" />
+                                    )}
+                                  </label>
+                                )
+                              })
+                            )}
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+
                       <button
                         type="button"
                         onClick={() => handleDelete('department', dept.id)}
@@ -265,7 +346,9 @@ export function OrgHierarchyManager() {
                     {isExpanded && (
                       <div className="ml-6 border-l border-border">
                         {deptDivisions.length === 0 ? (
-                          <div className="px-4 py-2 text-xs text-muted-foreground">No divisions</div>
+                          <div className="px-4 py-2 text-xs text-muted-foreground">
+                            No divisions assigned. Click "Assign Divisions" to add existing divisions.
+                          </div>
                         ) : (
                           deptDivisions.map((div) => {
                             const divDesignations = getDesignationsFor(div.id)
@@ -293,7 +376,8 @@ export function OrgHierarchyManager() {
                                   </Button>
                                   <button
                                     type="button"
-                                    onClick={() => handleDelete('division', div.id)}
+                                    onClick={() => handleToggleDivision(div.id, dept.id, false)}
+                                    title="Unassign division"
                                     className="p-1 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive"
                                   >
                                     <Trash2 className="w-3 h-3" />

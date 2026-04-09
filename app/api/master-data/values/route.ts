@@ -335,3 +335,52 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
+
+export async function PATCH(request: NextRequest) {
+  try {
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!canMutateMasterData(ctx.role)) return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+
+    const body = await request.json()
+    const { id, parent_id } = body
+
+    if (!id) {
+      return NextResponse.json({ error: 'id is required' }, { status: 400 })
+    }
+
+    const adminClient = getAdminClient()
+
+    // Try modern schema first
+    const modernUpdate = await adminClient
+      .from('master_data_values')
+      .update({ parent_id: parent_id ?? null, updated_at: new Date().toISOString() } as any)
+      .eq('id', id)
+      .select('id, name, parent_id, is_active')
+      .single()
+
+    if (!modernUpdate.error) {
+      masterDataCache.invalidatePrefix('values')
+      return NextResponse.json({ value: modernUpdate.data })
+    }
+
+    // Fallback: try without updated_at
+    const legacyUpdate = await adminClient
+      .from('master_data_values')
+      .update({ parent_id: parent_id ?? null } as any)
+      .eq('id', id)
+      .select('id, name, parent_id, is_active')
+      .single()
+
+    if (legacyUpdate.error) {
+      console.error('[master-data values API] PATCH error:', legacyUpdate.error)
+      return NextResponse.json({ error: legacyUpdate.error.message }, { status: 500 })
+    }
+
+    masterDataCache.invalidatePrefix('values')
+    return NextResponse.json({ value: legacyUpdate.data })
+  } catch (err: unknown) {
+    console.error('[master-data values API] PATCH error:', err)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  }
+}
