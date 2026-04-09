@@ -169,9 +169,10 @@ export default function TeamPage() {
           console.log(`[v0] Loaded ${usersData.length || 0} team members`)
 
           // Prefer centralized master data; fallback to distinct text values from users.
-          const [deptRes, desigRes] = await Promise.all([
+          const [deptRes, desigRes, divRes] = await Promise.all([
             fetch('/api/master-data/values?type=department'),
             fetch('/api/master-data/values?type=designation'),
+            fetch('/api/divisions'),
           ])
 
           if (deptRes.ok) {
@@ -202,6 +203,13 @@ export default function TeamPage() {
               ),
             ).map((name, idx) => ({ id: `desig-${idx}`, name }))
             setDesignations(uniqueDesigs)
+          }
+
+          // Load divisions from dedicated divisions table
+          if (divRes.ok) {
+            const divJson = await divRes.json()
+            const safeDivs = (divJson.divisions || []).filter((d: any) => d?.id && d?.name)
+            setDivisions(safeDivs as MasterDataValue[])
           }
 
           // Fetch team leads for reporting manager dropdown
@@ -240,25 +248,7 @@ export default function TeamPage() {
     init()
   }, [router, supabase])
 
-  useEffect(() => {
-    const loadDivisions = async () => {
-      if (!formData.department_id) {
-        setDivisions([])
-        setFormData((prev) => ({ ...prev, division_id: '' }))
-        return
-      }
-      const response = await fetch(
-        `/api/master-data/values?type=division&parent_id=${formData.department_id}`,
-      )
-      if (!response.ok) {
-        setDivisions([])
-        return
-      }
-      const data = await response.json()
-      setDivisions((data.values || []) as MasterDataValue[])
-    }
-    loadDivisions()
-  }, [formData.department_id])
+  // Divisions are loaded during init from /api/divisions (not department-specific)
 
   // Subject = person receiving a reporting line. Default to "member" level until role is chosen (create flow).
   const subjectRoleKey: RoleKey | null = formData.role
@@ -371,8 +361,11 @@ export default function TeamPage() {
           email: formData.email,
           full_name: formData.full_name,
           department: formData.department || '',
+          department_id: formData.department_id || null,
           division: divisions.find((d) => d.id === formData.division_id)?.name || '',
+          division_id: formData.division_id || null,
           designation: formData.designation || '',
+          designation_id: formData.designation_id || null,
           experience_years: formData.experience_years ? parseInt(formData.experience_years) : null,
           skills: formData.skillset ? formData.skillset.split(',').map(s => s.trim()).filter(Boolean) : [],
           reporting_manager_id: formData.reporting_manager_id || null,
@@ -388,7 +381,26 @@ export default function TeamPage() {
       }
 
       if (result.user) {
-        setTeamMembers([result.user as TeamMember, ...teamMembers])
+        const newMember: TeamMember = {
+          ...result.user,
+          id: result.user.id,
+          email: formData.email,
+          full_name: formData.full_name,
+          department: formData.department || null,
+          department_id: formData.department_id || null,
+          department_name: formData.department || null,
+          division_id: formData.division_id || null,
+          designation: formData.designation || null,
+          designation_id: formData.designation_id || null,
+          designation_name: formData.designation || null,
+          experience_years: formData.experience_years ? parseInt(formData.experience_years) : null,
+          skillset: formData.skillset ? formData.skillset.split(',').map(s => s.trim()).filter(Boolean) : null,
+          reporting_manager_id: formData.reporting_manager_id || null,
+          role: formData.role || null,
+          is_active: formData.is_active,
+          created_at: result.user.created_at || new Date().toISOString(),
+        }
+        setTeamMembers([newMember, ...teamMembers])
       }
 
       setShowCreateModal(false)

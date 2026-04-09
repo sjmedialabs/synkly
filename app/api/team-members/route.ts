@@ -143,8 +143,11 @@ export async function POST(request: NextRequest) {
     const email = String(body.email || '').trim().toLowerCase()
     const full_name = String(body.full_name || '').trim()
     const department = String(body.department || '').trim()
+    const department_id = body.department_id ? String(body.department_id) : null
     const division = String(body.division || '').trim()
+    const division_id = body.division_id ? String(body.division_id) : null
     const designation = String(body.designation || '').trim()
+    const designation_id = body.designation_id ? String(body.designation_id) : null
     const reporting_manager_id = body.reporting_manager_id ? String(body.reporting_manager_id) : null
     const role = String(body.role || '').trim().toLowerCase() as RoleKey
     const password = body.password ? String(body.password) : ''
@@ -287,7 +290,9 @@ export async function POST(request: NextRequest) {
       email,
       full_name,
       department,
+      department_id,
       designation,
+      designation_id,
       reporting_manager_id,
       experience_years,
       skillset: skills,
@@ -325,6 +330,7 @@ export async function POST(request: NextRequest) {
         {
           ...basePayload,
           division: division || null,
+          division_id: division_id || null,
           role,
           permissions: ROLE_PERMISSIONS[role],
           status: 'active',
