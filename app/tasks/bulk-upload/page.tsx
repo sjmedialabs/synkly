@@ -84,6 +84,11 @@ export default function BulkUploadPage() {
       }
     >
       <div className="max-w-4xl space-y-6">
+        <p className="text-sm text-muted-foreground rounded-lg border border-border bg-muted/30 px-4 py-3">
+          <strong className="text-foreground">Tip:</strong> Each row needs a <strong>Project Name</strong> that matches
+          a project you can access, plus <strong>Module Name</strong> and <strong>Task Name</strong>. New modules are
+          created automatically when missing.
+        </p>
         {/* Instructions */}
         <Card>
           <CardHeader>
@@ -92,8 +97,9 @@ export default function BulkUploadPage() {
               Import Tasks from Excel
             </CardTitle>
             <CardDescription>
-              Upload an Excel file (.xlsx) to create tasks in bulk. Each task must have a Project Name, Module Name, and Task Name.
-              Modules that don't exist will be auto-created under the matched project.
+              Upload an Excel file (.xlsx) to create tasks in bulk. Each task must have a Module Name and Task Name.
+              Include <strong>Project Name</strong> on every row unless you use project-scoped import from the Projects
+              page. Modules that don&apos;t exist are created under the matched project.
             </CardDescription>
           </CardHeader>
           <CardContent>

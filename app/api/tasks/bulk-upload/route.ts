@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthContext } from '@/lib/rbac-server'
 import { hasPermission, isFullAccessRole } from '@/lib/rbac'
 import { hasModulePermission } from '@/lib/rbac-server'
+import { getAccessibleProjectSummaries } from '@/lib/projects-access'
 import * as XLSX from 'xlsx'
 
 type RowData = {
@@ -55,6 +56,20 @@ export async function POST(request: NextRequest) {
     const file = formData.get('file') as File | null
     if (!file) return NextResponse.json({ error: 'Excel file is required' }, { status: 400 })
 
+    const fixedProjectId = String((formData.get('project_id') as string | null) || '').trim()
+    let lockedProject: { id: string; name: string } | null = null
+    if (fixedProjectId) {
+      const summaries = await getAccessibleProjectSummaries(ctx)
+      const found = summaries.find((s) => s.id === fixedProjectId)
+      if (!found) {
+        return NextResponse.json(
+          { error: 'Selected project was not found or you do not have access to it.' },
+          { status: 403 },
+        )
+      }
+      lockedProject = { id: found.id, name: (found.name || 'Project').trim() || 'Project' }
+    }
+
     // Parse Excel
     const buffer = await file.arrayBuffer()
     const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
@@ -97,25 +112,34 @@ export async function POST(request: NextRequest) {
 
     if (rows.length === 0) {
       return NextResponse.json({
-        error: 'No valid task rows found. Ensure columns: Project Name, Module Name, Task Name',
+        error: lockedProject
+          ? 'No valid task rows found. Ensure each row has Module Name and Task Name (Project Name can be omitted when a project is selected on the upload form).'
+          : 'No valid task rows found. Ensure columns: Project Name, Module Name, Task Name',
       }, { status: 400 })
     }
 
     const admin = ctx.adminClient
 
-    // Pre-fetch all projects accessible to the user
-    let projectsQuery = admin.from('projects').select('id, name, client_id')
-    if (!ctx.isMasterAdmin && ctx.clientId) {
-      projectsQuery = projectsQuery.eq('client_id', ctx.clientId)
-    }
-    const { data: projectRows } = await projectsQuery
     const projectsByName = new Map<string, { id: string; name: string }>()
-    for (const p of projectRows || []) {
-      projectsByName.set(p.name.toLowerCase().trim(), { id: p.id, name: p.name })
+    let projectIds: string[] = []
+
+    if (lockedProject) {
+      projectIds = [lockedProject.id]
+      projectsByName.set(lockedProject.name.toLowerCase().trim(), lockedProject)
+    } else {
+      // Pre-fetch all projects accessible in the same way as name-based import
+      let projectsQuery = admin.from('projects').select('id, name, client_id')
+      if (!ctx.isMasterAdmin && ctx.clientId) {
+        projectsQuery = projectsQuery.eq('client_id', ctx.clientId)
+      }
+      const { data: projectRows } = await projectsQuery
+      for (const p of projectRows || []) {
+        projectsByName.set(String(p.name).toLowerCase().trim(), { id: p.id, name: p.name })
+      }
+      projectIds = [...new Set([...projectsByName.values()].map((p) => p.id))]
     }
 
-    // Pre-fetch all modules
-    const projectIds = [...new Set([...projectsByName.values()].map((p) => p.id))]
+    // Pre-fetch all modules for involved projects
     let modulesByProjectAndName = new Map<string, { id: string; project_id: string }>()
     if (projectIds.length > 0) {
       const { data: moduleRows } = await admin
@@ -136,29 +160,34 @@ export async function POST(request: NextRequest) {
       const result: ImportResult = {
         row: row.row,
         task_name: row.task_name,
-        project_name: row.project_name,
+        project_name: row.project_name || lockedProject?.name || '',
         module_name: row.module_name,
         status: 'error',
       }
 
-      if (!row.project_name) {
-        result.error = 'Project Name is required'
-        results.push(result)
-        continue
-      }
       if (!row.module_name) {
         result.error = 'Module Name is required'
         results.push(result)
         continue
       }
 
-      // Resolve project
-      const project = projectsByName.get(row.project_name.toLowerCase())
-      if (!project) {
-        result.error = `Project "${row.project_name}" not found`
-        results.push(result)
-        continue
+      let project: { id: string; name: string } | null = null
+      if (lockedProject) {
+        project = lockedProject
+      } else {
+        if (!row.project_name) {
+          result.error = 'Project Name is required when no project is selected on the upload form'
+          results.push(result)
+          continue
+        }
+        project = projectsByName.get(row.project_name.toLowerCase().trim()) || null
+        if (!project) {
+          result.error = `Project "${row.project_name}" not found`
+          results.push(result)
+          continue
+        }
       }
+      result.project_name = project.name
 
       // Resolve or create module
       const moduleKey = `${project.id}::${row.module_name.toLowerCase()}`

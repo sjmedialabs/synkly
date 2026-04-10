@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
@@ -638,7 +638,7 @@ export default function TasksPage() {
                   <p>
                     {selectedTaskForDetails.completed_at
                       ? new Date(selectedTaskForDetails.completed_at).toLocaleString()
-                      : '—'}
+                      : 'ΓÇö'}
                   </p>
                 </div>
                 <div className="col-span-2">
@@ -683,7 +683,7 @@ export default function TasksPage() {
             try {
               const task_id = String(selectedTaskForAssign.id ?? '').trim()
               if (!task_id) {
-                throw new Error('Task ID is missing — refresh the page and try again.')
+                throw new Error('Task ID is missing ΓÇö refresh the page and try again.')
               }
               const response = await fetch('/api/tasks/assign', {
                 method: 'POST',

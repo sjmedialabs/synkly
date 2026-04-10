@@ -6,8 +6,12 @@ import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { ArrowLeft, Plus, X, Pencil } from 'lucide-react'
+import { SmartAssignModal } from '@/components/tasks/smart-assign-modal'
+import { ArrowLeft, Plus, X, Pencil, User, Calendar, Clock, ListTodo, CheckCircle2, Layers } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { hasPermission, isFullAccessRole, type RoleKey } from '@/lib/rbac'
+import { normalizeTaskWorkflowStatus } from '@/lib/task-workflow-status'
+import { sanitizeTaskDescriptionHtml } from '@/lib/sanitize-task-html'
 import {
   fetchModuleFromUrlRef,
   fetchProjectFromUrlRef,
@@ -41,9 +45,163 @@ type TaskRecord = {
   estimated_hours?: number | null
   start_date?: string | null
   end_date?: string | null
+  created_at?: string
+  priority?: string | null
+  task_type?: string | null
+  due_date?: string | null
+  sprint_id?: string | null
+  project_id?: string | null
+  carried_from_sprint_id?: string | null
 }
 
 const TASK_ATTACHMENT_ACCEPT = 'image/*,.pdf,application/pdf'
+
+const TASK_CARD_ACCENTS = [
+  'from-primary/80 via-primary/35 to-transparent',
+  'from-cyan-500/65 via-cyan-400/22 to-transparent',
+  'from-violet-500/65 via-violet-400/22 to-transparent',
+  'from-emerald-500/65 via-emerald-400/22 to-transparent',
+  'from-amber-500/60 via-amber-400/20 to-transparent',
+  'from-rose-500/55 via-rose-400/18 to-transparent',
+]
+
+function fmtDate(d: string | null | undefined) {
+  if (!d) return '—'
+  try {
+    return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+  } catch {
+    return '—'
+  }
+}
+
+function fmtDateTime(d: string | null | undefined) {
+  if (!d) return '—'
+  try {
+    return new Date(d).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return '—'
+  }
+}
+
+const priorityColors: Record<string, string> = {
+  critical: 'bg-red-500',
+  high: 'bg-destructive',
+  medium: 'bg-accent',
+  low: 'bg-green-500',
+}
+
+const taskTypeIcons: Record<string, string> = {
+  task: 'T',
+  bug: 'B',
+  feature: 'F',
+  improvement: 'I',
+  epic: 'E',
+  story: 'S',
+}
+
+function ModuleTaskListRow({
+  task,
+  accentClass,
+  isSelected,
+  canAssignTask,
+  onSelect,
+  onStatusChange,
+  onAssign,
+}: {
+  task: TaskRecord
+  accentClass: string
+  isSelected: boolean
+  canAssignTask: boolean
+  onSelect: (task: TaskRecord) => void
+  onStatusChange: (taskId: string, status: string) => void
+  onAssign: (task: TaskRecord) => void
+}) {
+  return (
+    <article
+      role="button"
+      tabIndex={0}
+      onClick={() => onSelect(task)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onSelect(task)
+        }
+      }}
+      className={cn(
+        'relative cursor-pointer overflow-hidden rounded-xl border bg-card text-left shadow-sm transition-all',
+        isSelected ? 'border-primary ring-2 ring-primary/20' : 'border-border/80 hover:border-primary/30',
+      )}
+    >
+      <div className={cn('absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r', accentClass)} aria-hidden />
+      <div className="p-3 pl-3.5">
+        <div className="flex items-start gap-2">
+          <span
+            className={cn(
+              'mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded text-[10px] font-bold text-white',
+              task.task_type === 'bug'
+                ? 'bg-destructive'
+                : task.task_type === 'feature'
+                  ? 'bg-green-500'
+                  : task.task_type === 'epic'
+                    ? 'bg-purple-500'
+                    : 'bg-primary',
+            )}
+          >
+            {taskTypeIcons[task.task_type || 'task'] || 'T'}
+          </span>
+          <div className="min-w-0 flex-1">
+            <h3 className="line-clamp-2 text-sm font-semibold leading-snug text-foreground">{task.title}</h3>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+              <span className="capitalize text-foreground/90">
+                {normalizeTaskWorkflowStatus(task.status).replace(/_/g, ' ')}
+              </span>
+              {task.priority ? (
+                <span className="inline-flex items-center gap-1">
+                  <span className={cn('h-1.5 w-1.5 rounded-full', priorityColors[task.priority] || 'bg-muted')} />
+                  <span className="capitalize">{task.priority}</span>
+                </span>
+              ) : null}
+              {task.assignee ? (
+                <span className="truncate">
+                  {(task.assignee.full_name || task.assignee.email)?.split(' ')[0]}
+                </span>
+              ) : (
+                <span className="text-amber-700/90 dark:text-amber-400/90">Unassigned</span>
+              )}
+            </div>
+            <div
+              className="mt-2 flex flex-wrap gap-2 border-t border-border/50 pt-2"
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+            >
+              <select
+                value={normalizeTaskWorkflowStatus(task.status)}
+                onChange={(e) => onStatusChange(task.id, e.target.value)}
+                className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-[11px] text-foreground"
+              >
+                <option value="todo">To Do</option>
+                <option value="in_progress">In Progress</option>
+                <option value="in_review">In Review</option>
+                <option value="done">Done</option>
+              </select>
+              {canAssignTask ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  className="h-7 shrink-0 px-2 text-[11px]"
+                  onClick={() => onAssign(task)}
+                >
+                  Assign
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+  )
+}
 
 function isAllowedTaskAttachmentFile(file: File): boolean {
   const t = (file.type || '').toLowerCase()
@@ -104,6 +262,10 @@ export default function ProjectModuleDetailPage() {
     end_date: '',
     status: 'todo',
   })
+  const [userRole, setUserRole] = useState<string | null>(null)
+  const [selectedTask, setSelectedTask] = useState<TaskRecord | null>(null)
+  const [showAssignModal, setShowAssignModal] = useState(false)
+  const [selectedTaskForAssign, setSelectedTaskForAssign] = useState<TaskRecord | null>(null)
 
   useEffect(() => {
     async function load() {
@@ -115,6 +277,12 @@ export default function ProjectModuleDetailPage() {
       if (!auth.user) {
         router.push('/auth/login')
         return
+      }
+
+      const meRes = await fetch('/api/me')
+      if (meRes.ok) {
+        const me = await meRes.json()
+        setUserRole(me.role ?? null)
       }
 
       const { data: summaryRows } = await supabase.from('projects').select('id, name')
@@ -256,6 +424,17 @@ export default function ProjectModuleDetailPage() {
     load()
   }, [moduleRef, projectRef, router, supabase])
 
+  useEffect(() => {
+    setSelectedTask((prev) => {
+      if (tasks.length === 0) return null
+      if (prev) {
+        const next = tasks.find((t) => t.id === prev.id)
+        return next ?? tasks[0] ?? null
+      }
+      return tasks[0] ?? null
+    })
+  }, [tasks])
+
   if (loading) {
     return (
       <DashboardLayout title="Module Details">
@@ -266,10 +445,63 @@ export default function ProjectModuleDetailPage() {
 
   if (!module) return null
 
-  const totalEstimation = tasks.reduce(
-    (sum, task) => sum + Number(task.estimation ?? task.estimated_hours ?? 0),
-    0,
-  )
+  const role = userRole as RoleKey | null
+  const canAssignTask = !!role && (isFullAccessRole(role) || hasPermission(role, 'ASSIGN_TASK'))
+
+  const handleTaskStatusChange = async (taskId: string, newStatus: string) => {
+    const current = tasks.find((t) => t.id === taskId)
+    const canonical = normalizeTaskWorkflowStatus(newStatus)
+    if (!current || normalizeTaskWorkflowStatus(current.status) === canonical) return
+
+    const previousStatus = current.status
+    const previousCompletedAt = current.completed_at
+    setTasks((prev) =>
+      prev.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              status: canonical,
+              completed_at: canonical === 'done' ? new Date().toISOString() : null,
+            }
+          : task,
+      ),
+    )
+    setSelectedTask((prev) =>
+      prev?.id === taskId
+        ? {
+            ...prev,
+            status: canonical,
+            completed_at: canonical === 'done' ? new Date().toISOString() : null,
+          }
+        : prev,
+    )
+
+    try {
+      const statusRes = await fetch('/api/tasks', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId, status: canonical }),
+      })
+      const statusJson = await statusRes.json()
+      if (!statusRes.ok) throw new Error(statusJson.error || 'Failed to update task')
+      if (statusJson.task) {
+        const patch = statusJson.task as Partial<TaskRecord>
+        setTasks((prev) => prev.map((task) => (task.id === taskId ? { ...task, ...patch } : task)))
+        setSelectedTask((prev) => (prev?.id === taskId ? { ...prev, ...patch } : prev))
+      }
+    } catch (e: unknown) {
+      console.error(e)
+      setTasks((prev) =>
+        prev.map((task) =>
+          task.id === taskId ? { ...task, status: previousStatus, completed_at: previousCompletedAt } : task,
+        ),
+      )
+      setSelectedTask((prev) =>
+        prev?.id === taskId ? { ...prev, status: previousStatus, completed_at: previousCompletedAt } : prev,
+      )
+      alert('Error updating task: ' + (e instanceof Error ? e.message : 'Unknown error'))
+    }
+  }
 
   async function uploadAttachmentFile(
     file: File,
@@ -640,75 +872,287 @@ export default function ProjectModuleDetailPage() {
         </div>
       }
     >
-      <div className="grid gap-4 md:grid-cols-3 mb-6">
-        <Card>
-          <CardContent className="pt-6">
-            <p className="text-sm text-muted-foreground">Status</p>
-            <p className="font-semibold">{module.status}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <p className="text-sm text-muted-foreground">Tasks</p>
-            <p className="font-semibold">{tasks.length}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <p className="text-sm text-muted-foreground">Estimation</p>
-            <p className="font-semibold">{totalEstimation}h</p>
-          </CardContent>
-        </Card>
+      <p className="mb-6 text-xs text-muted-foreground">
+        Module status: <span className="text-foreground">{module.status.replace(/_/g, ' ')}</span>
+        {module.description ? (
+          <>
+            <span className="mx-2 text-border">·</span>
+            {module.description}
+          </>
+        ) : null}
+      </p>
+
+      <div className="mb-3">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Tasks</h2>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Tasks</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {tasks.length === 0 ? (
-            <p className="text-muted-foreground">No tasks found for this module</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-secondary border-b border-border">
-                  <tr>
-                    <th className="text-left px-3 py-2">Task</th>
-                    <th className="text-left px-3 py-2">Status</th>
-                    <th className="text-left px-3 py-2">Assignee</th>
-                    <th className="text-left px-3 py-2">Estimation</th>
-                    <th className="text-left px-3 py-2">Start Date</th>
-                    <th className="text-left px-3 py-2">Target End</th>
-                    <th className="text-left px-3 py-2">Completed</th>
-                    <th className="text-right px-3 py-2">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tasks.map((task) => (
-                    <tr key={task.id} className="border-t border-border">
-                      <td className="px-3 py-2">{task.title}</td>
-                      <td className="px-3 py-2">{task.status}</td>
-                      <td className="px-3 py-2">{task.assignee?.full_name || task.assignee?.email || 'Unassigned'}</td>
-                      <td className="px-3 py-2">{Number(task.estimation ?? task.estimated_hours ?? 0)}h</td>
-                      <td className="px-3 py-2">{task.start_date ? new Date(task.start_date).toLocaleDateString() : '—'}</td>
-                      <td className="px-3 py-2">{task.end_date ? new Date(task.end_date).toLocaleDateString() : '—'}</td>
-                      <td className="px-3 py-2">
-                        {task.completed_at ? new Date(task.completed_at).toLocaleString() : '—'}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        <Button size="sm" variant="outline" onClick={() => openEditTaskModal(task)}>
-                          <Pencil className="w-4 h-4 mr-1" />
-                          Edit
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+      {tasks.length === 0 ? (
+        <p className="rounded-2xl border border-dashed border-border py-12 text-center text-sm text-muted-foreground">
+          No tasks in this module yet. Create one to get started.
+        </p>
+      ) : (
+        <div className="grid min-h-0 grid-cols-1 gap-4 lg:grid-cols-[2fr_3fr] lg:items-start">
+          <div
+            className={cn(
+              'flex min-h-0 flex-col overflow-hidden rounded-2xl border border-border/80 bg-card/50 shadow-sm',
+              'h-[min(75vh,680px)] max-h-[min(75vh,680px)]',
+            )}
+          >
+            <div className="shrink-0 border-b border-border/60 px-3 py-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Task list ({tasks.length})
+              </p>
             </div>
-          )}
-        </CardContent>
-      </Card>
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overflow-x-hidden overscroll-contain px-2 py-3">
+              {tasks.map((task, i) => (
+                <ModuleTaskListRow
+                  key={task.id}
+                  task={task}
+                  accentClass={TASK_CARD_ACCENTS[i % TASK_CARD_ACCENTS.length]}
+                  isSelected={selectedTask?.id === task.id}
+                  canAssignTask={canAssignTask}
+                  onSelect={setSelectedTask}
+                  onStatusChange={handleTaskStatusChange}
+                  onAssign={(t) => {
+                    setSelectedTaskForAssign(t)
+                    setShowAssignModal(true)
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="min-h-0 lg:sticky lg:top-4">
+            {selectedTask ? (
+              <div className="flex h-[min(75vh,680px)] max-h-[min(75vh,680px)] min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+                <div className="shrink-0 border-b border-border p-4">
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="text-base font-semibold leading-snug text-foreground">{selectedTask.title}</h3>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {canAssignTask ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="text-xs"
+                          onClick={() => {
+                            setSelectedTaskForAssign(selectedTask)
+                            setShowAssignModal(true)
+                          }}
+                        >
+                          Assign
+                        </Button>
+                      ) : null}
+                      <Button type="button" size="sm" variant="outline" onClick={() => void openEditTaskModal(selectedTask)} title="Edit task">
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 text-sm">
+                  <div className="mb-4">
+                    <p className="text-xs text-muted-foreground">Description</p>
+                    {selectedTask.description ? (
+                      <div
+                        className="mt-1 max-w-none overflow-x-auto text-foreground [&_img]:max-w-full [&_img]:h-auto [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_a]:text-primary [&_a]:underline"
+                        dangerouslySetInnerHTML={{
+                          __html: sanitizeTaskDescriptionHtml(selectedTask.description),
+                        }}
+                      />
+                    ) : (
+                      <p className="mt-1 text-muted-foreground">No description</p>
+                    )}
+                  </div>
+                  <div className="mb-4">
+                    <label htmlFor="module-task-status" className="text-xs text-muted-foreground">
+                      Status
+                    </label>
+                    <select
+                      id="module-task-status"
+                      value={normalizeTaskWorkflowStatus(selectedTask.status)}
+                      onChange={(e) => handleTaskStatusChange(selectedTask.id, e.target.value)}
+                      className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground"
+                    >
+                      <option value="todo">To Do</option>
+                      <option value="in_progress">In Progress</option>
+                      <option value="in_review">In Review</option>
+                      <option value="done">Done</option>
+                    </select>
+                  </div>
+                  <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="flex gap-2 rounded-lg bg-muted/30 p-3 ring-1 ring-border/50">
+                      <Layers className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <div>
+                        <dt className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Module</dt>
+                        <dd className="text-sm font-medium text-foreground">{module.name}</dd>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 rounded-lg bg-muted/30 p-3 ring-1 ring-border/50">
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <div>
+                        <dt className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Priority</dt>
+                        <dd className="text-sm font-medium capitalize text-foreground">{selectedTask.priority || '—'}</dd>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 rounded-lg bg-muted/30 p-3 ring-1 ring-border/50">
+                      <User className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <div>
+                        <dt className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Assignee</dt>
+                        <dd className="text-sm font-medium text-foreground">
+                          {selectedTask.assignee
+                            ? selectedTask.assignee.full_name || selectedTask.assignee.email
+                            : '—'}
+                        </dd>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 rounded-lg bg-muted/30 p-3 ring-1 ring-border/50">
+                      <Clock className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <div>
+                        <dt className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Estimate (h)</dt>
+                        <dd className="text-sm font-medium tabular-nums text-foreground">
+                          {selectedTask.estimation ?? selectedTask.estimated_hours ?? '—'}
+                        </dd>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 rounded-lg bg-muted/30 p-3 ring-1 ring-border/50">
+                      <Calendar className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <div>
+                        <dt className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Start</dt>
+                        <dd className="text-sm font-medium text-foreground">{fmtDate(selectedTask.start_date)}</dd>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 rounded-lg bg-muted/30 p-3 ring-1 ring-border/50">
+                      <Calendar className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <div>
+                        <dt className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Target end</dt>
+                        <dd className="text-sm font-medium text-foreground">{fmtDate(selectedTask.end_date)}</dd>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 rounded-lg bg-muted/30 p-3 ring-1 ring-border/50">
+                      <Calendar className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <div>
+                        <dt className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Due</dt>
+                        <dd className="text-sm font-medium text-foreground">{fmtDate(selectedTask.due_date)}</dd>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 rounded-lg bg-muted/30 p-3 ring-1 ring-border/50">
+                      <ListTodo className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <div>
+                        <dt className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Created</dt>
+                        <dd className="text-sm font-medium text-foreground">{fmtDateTime(selectedTask.created_at)}</dd>
+                      </div>
+                    </div>
+                    {selectedTask.completed_at ? (
+                      <div className="flex gap-2 rounded-lg bg-muted/30 p-3 ring-1 ring-border/50 sm:col-span-2">
+                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
+                        <div>
+                          <dt className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Completed</dt>
+                          <dd className="text-sm font-medium text-foreground">{fmtDateTime(selectedTask.completed_at)}</dd>
+                        </div>
+                      </div>
+                    ) : null}
+                  </dl>
+                  {selectedTask.document_url ? (
+                    <p className="mt-4 text-xs">
+                      <span className="text-muted-foreground">Document: </span>
+                      <a
+                        href={selectedTask.document_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-medium text-primary underline"
+                      >
+                        Open link
+                      </a>
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <div className="flex h-[min(75vh,680px)] max-h-[min(75vh,680px)] items-center justify-center rounded-2xl border border-dashed border-border bg-muted/20 px-6 text-center text-sm text-muted-foreground">
+                Select a task to view details
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showAssignModal && selectedTaskForAssign ? (
+        <SmartAssignModal
+          task={{
+            id: selectedTaskForAssign.id,
+            title: selectedTaskForAssign.title,
+            estimated_hours: selectedTaskForAssign.estimated_hours,
+            project_id: selectedTaskForAssign.project_id ?? module.project_id,
+            sprint_id: selectedTaskForAssign.sprint_id,
+          }}
+          onClose={() => {
+            setShowAssignModal(false)
+            setSelectedTaskForAssign(null)
+          }}
+          onAssign={async (employeeId, estimatedHours, sprintId, targetEndDate) => {
+            try {
+              const task_id = String(selectedTaskForAssign.id ?? '').trim()
+              if (!task_id) {
+                throw new Error('Task ID is missing — refresh the page and try again.')
+              }
+              const response = await fetch('/api/tasks/assign', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  task_id,
+                  assignee_id: employeeId,
+                  estimated_hours: estimatedHours,
+                  sprint_id: sprintId,
+                  month: new Date().toISOString().slice(0, 7),
+                  ...(targetEndDate ? { end_date: targetEndDate } : {}),
+                }),
+              })
+              const result = await response.json()
+              if (!response.ok) throw new Error(result.error || 'Failed to assign task')
+              const updatedTask = result.task as TaskRecord
+              const assignee = teamMembers.find((m) => m.id === employeeId)
+              setTasks((prevTasks) =>
+                prevTasks.map((task) =>
+                  task.id === selectedTaskForAssign.id
+                    ? {
+                        ...task,
+                        assignee_id: employeeId,
+                        assignee: assignee ? { full_name: assignee.full_name, email: assignee.email } : null,
+                        estimated_hours: updatedTask?.estimated_hours ?? estimatedHours,
+                        sprint_id: updatedTask?.sprint_id ?? null,
+                        end_date: updatedTask?.end_date ?? task.end_date ?? null,
+                        carried_from_sprint_id: updatedTask?.carried_from_sprint_id ?? task.carried_from_sprint_id,
+                      }
+                    : task,
+                ),
+              )
+              setSelectedTask((prev) =>
+                prev?.id === selectedTaskForAssign.id
+                  ? {
+                      ...prev,
+                      assignee_id: employeeId,
+                      assignee: assignee ? { full_name: assignee.full_name, email: assignee.email } : null,
+                      estimated_hours: updatedTask?.estimated_hours ?? estimatedHours,
+                      sprint_id: updatedTask?.sprint_id ?? null,
+                      end_date: updatedTask?.end_date ?? prev.end_date ?? null,
+                      carried_from_sprint_id: updatedTask?.carried_from_sprint_id ?? prev.carried_from_sprint_id,
+                    }
+                  : prev,
+              )
+              if (result.sprintAssignmentSkipped) {
+                alert(
+                  'Task was assigned successfully, but sprint assignments may be limited until migrations are applied.',
+                )
+              }
+              setShowAssignModal(false)
+              setSelectedTaskForAssign(null)
+            } catch (err) {
+              console.error(err)
+              throw err
+            }
+          }}
+        />
+      ) : null}
 
       {showCreateTaskModal && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">

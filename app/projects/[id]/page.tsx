@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
@@ -13,18 +13,19 @@ import {
 import { canCreateModules } from '@/lib/rbac'
 import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { 
-  ArrowLeft, 
-  Calendar, 
-  Users,
-  CheckSquare, 
-  Target,
+import {
+  ArrowLeft,
+  CheckSquare,
   Plus,
   X,
-  MoreVertical,
-  Eye,
+  Upload,
+  Layers,
+  ListTodo,
+  Clock,
+  ArrowRight,
 } from 'lucide-react'
+import { QuickCreateTaskModal } from '@/components/projects/quick-create-task-modal'
+import { cn } from '@/lib/utils'
 
 interface Project {
   id: string
@@ -48,20 +49,25 @@ interface Module {
   is_active?: boolean
 }
 
-interface Task {
-  id: string
-  status: string
+type TaskRollupRow = {
   module_id: string | null
-  estimation?: number | null
-  estimated_hours?: number | null
+  estimation: number | null
+  estimated_hours: number | null
 }
 
-const statusColors: Record<string, string> = {
-  planning: 'bg-muted text-muted-foreground',
-  active: 'bg-primary/10 text-primary',
-  on_hold: 'bg-accent/10 text-accent',
-  completed: 'bg-green-500/10 text-green-600',
-  cancelled: 'bg-destructive/10 text-destructive',
+const MODULE_ACCENTS = [
+  'from-primary/80 via-primary/40 to-transparent',
+  'from-cyan-500/70 via-cyan-400/25 to-transparent',
+  'from-violet-500/70 via-violet-400/25 to-transparent',
+  'from-emerald-500/70 via-emerald-400/25 to-transparent',
+  'from-amber-500/70 via-amber-400/25 to-transparent',
+  'from-rose-500/65 via-rose-400/22 to-transparent',
+]
+
+function formatModuleStatus(m: Module) {
+  if (m.is_active === false) return 'Disabled'
+  const s = (m.status || 'active').replace(/_/g, ' ')
+  return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
 export default function ProjectDetailPage() {
@@ -71,15 +77,40 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<Project | null>(null)
   const [projectSummaries, setProjectSummaries] = useState<{ id: string; name: string | null }[]>([])
   const [modules, setModules] = useState<Module[]>([])
-  const [tasks, setTasks] = useState<Task[]>([])
+  const [taskRollupRows, setTaskRollupRows] = useState<TaskRollupRow[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddModuleModal, setShowAddModuleModal] = useState(false)
   const [newModuleName, setNewModuleName] = useState('')
   const [creatingModule, setCreatingModule] = useState(false)
   const [canAddModule, setCanAddModule] = useState(false)
+  const [showCreateTask, setShowCreateTask] = useState(false)
+  const [createTaskModalKey, setCreateTaskModalKey] = useState(0)
+  const prevShowCreateTask = useRef(false)
 
   const router = useRouter()
   const supabase = createClient()
+
+  const refreshTaskRollup = useCallback(
+    async (projectId: string, moduleList: Module[]) => {
+      const sel = 'module_id, estimation, estimated_hours'
+      let rows: TaskRollupRow[] = []
+      const byProject = await supabase
+        .from('tasks')
+        .select(sel)
+        .eq('project_id', projectId)
+      if (!byProject.error && byProject.data) {
+        rows = byProject.data as TaskRollupRow[]
+      } else if (moduleList.length > 0) {
+        const moduleIds = moduleList.map((m) => m.id).filter(Boolean)
+        if (moduleIds.length > 0) {
+          const byMod = await supabase.from('tasks').select(sel).in('module_id', moduleIds)
+          if (!byMod.error && byMod.data) rows = byMod.data as TaskRollupRow[]
+        }
+      }
+      setTaskRollupRows(rows)
+    },
+    [supabase],
+  )
 
   useEffect(() => {
     async function fetchData() {
@@ -141,34 +172,42 @@ export default function ProjectDetailPage() {
         is_active: m.is_active ?? true,
       })) as Module[]
 
-      let finalTasks: Task[] = []
-      const tasksByProject = await supabase
-        .from('tasks')
-        .select('*')
-        .eq('project_id', resolvedProjectId)
-        .order('created_at', { ascending: false })
+      setModules(finalModules)
 
-      if (!tasksByProject.error) {
-        finalTasks = (tasksByProject.data || []) as Task[]
+      let rollup: TaskRollupRow[] = []
+      const rollupRes = await supabase
+        .from('tasks')
+        .select('module_id, estimation, estimated_hours')
+        .eq('project_id', resolvedProjectId)
+
+      if (!rollupRes.error && rollupRes.data) {
+        rollup = rollupRes.data as TaskRollupRow[]
       } else if (finalModules.length > 0) {
         const moduleIds = finalModules.map((m) => m.id).filter(Boolean)
         if (moduleIds.length > 0) {
-          const tasksByModules = await supabase
+          const byMod = await supabase
             .from('tasks')
-            .select('*')
+            .select('module_id, estimation, estimated_hours')
             .in('module_id', moduleIds)
-            .order('created_at', { ascending: false })
-          finalTasks = (tasksByModules.data || []) as Task[]
+          if (!byMod.error && byMod.data) {
+            rollup = byMod.data as TaskRollupRow[]
+          }
         }
       }
 
-      setModules(finalModules)
-      setTasks(finalTasks)
+      setTaskRollupRows(rollup)
       setLoading(false)
     }
 
     fetchData()
   }, [projectRef, router, supabase])
+
+  useEffect(() => {
+    if (prevShowCreateTask.current && !showCreateTask && project) {
+      void refreshTaskRollup(project.id, modules)
+    }
+    prevShowCreateTask.current = showCreateTask
+  }, [showCreateTask, project, modules, refreshTaskRollup])
 
   if (loading) {
     return (
@@ -190,17 +229,8 @@ export default function ProjectDetailPage() {
     return null
   }
 
-  const taskStats = {
-    total: tasks.length,
-    todo: tasks.filter(t => t.status === 'todo').length,
-    inProgress: tasks.filter(t => t.status === 'in_progress').length,
-    done: tasks.filter(t => t.status === 'done').length,
-  }
-
-  const totalEstimation = modules.reduce((sum, mod) => sum + (mod.estimated_hours || 0), 0)
-
   const moduleAggregates = modules.map((module) => {
-    const moduleTasks = tasks.filter((task) => task.module_id === module.id)
+    const moduleTasks = taskRollupRows.filter((task) => task.module_id === module.id)
     const taskCount = moduleTasks.length
     const estimatedTime = moduleTasks.reduce((sum, task) => {
       const estimation = Number(task.estimation ?? task.estimated_hours ?? 0)
@@ -252,202 +282,181 @@ export default function ProjectDetailPage() {
   }
 
   return (
-    <DashboardLayout 
+    <DashboardLayout
       title={project.name}
       actions={
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => {
+              setCreateTaskModalKey((k) => k + 1)
+              setShowCreateTask(true)
+            }}
+          >
+            <CheckSquare className="w-4 h-4 mr-2" />
+            Create task
+          </Button>
+          <Button variant="outline" size="sm" asChild>
+            <Link href="/tasks/bulk-upload">
+              <Upload className="w-4 h-4 mr-2" />
+              Bulk upload
+            </Link>
+          </Button>
           <Link href="/projects">
             <Button variant="outline" size="sm">
               <ArrowLeft className="w-4 h-4 mr-2" />
               Back to Projects
             </Button>
           </Link>
-          <Button variant="outline" size="sm">
-            <MoreVertical className="w-4 h-4" />
-          </Button>
         </div>
       }
     >
-      {/* Project Header */}
-      <div className="mb-8">
-        <div className="flex items-center gap-3 mb-4">
-          <span className={`px-3 py-1 rounded-full text-sm font-medium capitalize ${statusColors[project.status]}`}>
-            {project.status.replace('_', ' ')}
-          </span>
-          <span className={`px-3 py-1 rounded-full text-sm font-medium capitalize ${
-            project.priority === 'high' ? 'bg-destructive/10 text-destructive' :
-            project.priority === 'medium' ? 'bg-accent/10 text-accent' :
-            'bg-muted text-muted-foreground'
-          }`}>
-            {project.priority} priority
-          </span>
-          {project.phase && (
-            <span className="px-3 py-1 rounded-full text-sm font-medium bg-primary/10 text-primary">
-              {project.phase}
-            </span>
+      {showCreateTask && (
+        <QuickCreateTaskModal
+          key={createTaskModalKey}
+          onClose={() => setShowCreateTask(false)}
+          projects={projectSummaries.map((s) => ({ id: s.id, name: s.name || 'Untitled project' }))}
+          defaultProjectId={project.id}
+        />
+      )}
+
+      <div className="mb-8 space-y-3">
+        {project.description ? (
+          <p className="text-muted-foreground max-w-3xl text-sm leading-relaxed">{project.description}</p>
+        ) : null}
+        <p className="text-xs text-muted-foreground">
+          <span className="text-foreground/80">Status:</span> {project.status.replace(/_/g, ' ')}
+          <span className="mx-2 text-border">·</span>
+          <span className="text-foreground/80">Priority:</span> {project.priority}
+          {project.phase ? (
+            <>
+              <span className="mx-2 text-border">·</span>
+              <span className="text-foreground/80">Phase:</span> {project.phase}
+            </>
+          ) : null}
+          {project.end_date ? (
+            <>
+              <span className="mx-2 text-border">·</span>
+              <span className="text-foreground/80">Target end:</span>{' '}
+              {new Date(project.end_date).toLocaleDateString(undefined, {
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+              })}
+            </>
+          ) : null}
+        </p>
+      </div>
+
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Modules</h2>
+        <div className="flex flex-wrap gap-2">
+          {canAddModule && (
+            <Button size="sm" onClick={() => setShowAddModuleModal(true)} className="bg-primary text-primary-foreground">
+              <Plus className="w-4 h-4 mr-1" />
+              Add module
+            </Button>
           )}
+          <Link href={`/modules?project=${project.id}`}>
+            <Button size="sm" variant="outline">
+              View all modules
+            </Button>
+          </Link>
+          <Link href="/tasks">
+            <Button size="sm" variant="outline">
+              Global task board
+            </Button>
+          </Link>
         </div>
-        {project.description && (
-          <p className="text-muted-foreground max-w-3xl">{project.description}</p>
-        )}
       </div>
 
-      {/* Stats Grid */}
-      <div className="grid gap-4 md:grid-cols-4 mb-8">
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center gap-3">
-              <CheckSquare className="w-8 h-8 text-primary" />
-              <div>
-                <p className="text-2xl font-bold text-foreground">{taskStats.total}</p>
-                <p className="text-sm text-muted-foreground">Total Tasks</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center gap-3">
-              <Target className="w-8 h-8 text-cyan-500" />
-              <div>
-                <p className="text-2xl font-bold text-foreground">{modules.length}</p>
-                <p className="text-sm text-muted-foreground">Modules</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center gap-3">
-              <Users className="w-8 h-8 text-accent" />
-              <div>
-                <p className="text-2xl font-bold text-foreground">{totalEstimation}h</p>
-                <p className="text-sm text-muted-foreground">Total Estimation</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center gap-3">
-              <Calendar className="w-8 h-8 text-green-500" />
-              <div>
-                <p className="text-2xl font-bold text-foreground">
-                  {project.end_date ? new Date(project.end_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '-'}
-                </p>
-                <p className="text-sm text-muted-foreground">Due Date</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <div className="grid gap-6 grid-cols-1">
-        {/* Modules */}
-        <Card className="col-span-full">
-          <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle>Modules</CardTitle>
-            <div className="flex gap-2">
-              {canAddModule && (
-              <Button 
-                size="sm" 
-                onClick={() => setShowAddModuleModal(true)}
-                className="bg-primary hover:bg-primary/90 text-white"
-              >
-                <Plus className="w-4 h-4 mr-1" />
-                Add Module
-              </Button>
-              )}
-              <Link href={`/modules?project=${project.id}`}>
-                <Button size="sm" variant="outline">View All</Button>
+      {modules.length === 0 ? (
+        <p className="py-12 text-center text-sm text-muted-foreground border border-dashed border-border rounded-2xl">
+          No modules yet. Add one to organize work.
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {moduleAggregates.map(({ module, taskCount, estimatedTime }, i) => {
+            const href = projectModuleHref(project, module, projectSummaries, modules)
+            return (
+              <Link key={module.id} href={href} className="group block rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2">
+                <article
+                  className={cn(
+                    'relative flex h-full flex-col overflow-hidden rounded-2xl border border-border/80 bg-card',
+                    'shadow-sm transition-all duration-300 ease-out',
+                    'hover:border-primary/30 hover:shadow-lg hover:-translate-y-1',
+                  )}
+                >
+                  <div
+                    className={cn(
+                      'absolute inset-x-0 top-0 h-1 bg-gradient-to-r opacity-90',
+                      MODULE_ACCENTS[i % MODULE_ACCENTS.length],
+                    )}
+                    aria-hidden
+                  />
+                  <div className="flex flex-1 flex-col p-5 pt-6">
+                    <div className="mb-4 min-h-[2.75rem]">
+                      <h3 className="text-base font-semibold tracking-tight text-foreground transition-colors group-hover:text-primary line-clamp-2">
+                        {module.name}
+                      </h3>
+                      {module.description ? (
+                        <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{module.description}</p>
+                      ) : null}
+                    </div>
+                    <dl className="mb-4 grid grid-cols-3 gap-2 text-center">
+                      <div className="rounded-lg bg-muted/40 px-2 py-2.5 ring-1 ring-border/50">
+                        <dt className="mb-0.5 flex items-center justify-center gap-0.5 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          <Layers className="h-3 w-3" aria-hidden />
+                          Status
+                        </dt>
+                        <dd className="text-[11px] font-medium text-foreground leading-tight">{formatModuleStatus(module)}</dd>
+                      </div>
+                      <div className="rounded-lg bg-muted/40 px-2 py-2.5 ring-1 ring-border/50">
+                        <dt className="mb-0.5 flex items-center justify-center gap-0.5 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          <ListTodo className="h-3 w-3" aria-hidden />
+                          Tasks
+                        </dt>
+                        <dd className="text-lg font-bold tabular-nums text-foreground">{taskCount}</dd>
+                      </div>
+                      <div className="rounded-lg bg-muted/40 px-2 py-2.5 ring-1 ring-border/50">
+                        <dt className="mb-0.5 flex items-center justify-center gap-0.5 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          <Clock className="h-3 w-3" aria-hidden />
+                          Est.
+                        </dt>
+                        <dd className="text-lg font-bold tabular-nums text-foreground">
+                          {estimatedTime}
+                          <span className="text-xs font-semibold text-muted-foreground">h</span>
+                        </dd>
+                      </div>
+                    </dl>
+                    <div className="mt-auto flex items-center justify-between gap-2 border-t border-border/60 pt-4 text-xs">
+                      <span className="text-muted-foreground">Module tasks</span>
+                      <span className="inline-flex items-center gap-1 font-medium text-primary">
+                        Open
+                        <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+                      </span>
+                    </div>
+                  </div>
+                </article>
               </Link>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {modules.length === 0 ? (
-              <p className="text-center text-muted-foreground py-8">
-                No modules found. Add a module to get started.
-              </p>
-            ) : (
-              <div className="overflow-x-auto rounded-lg border border-border">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-secondary z-10">
-                    <tr>
-                      <th className="text-left px-3 py-2 font-semibold">Module Name</th>
-                      <th className="text-left px-3 py-2 font-semibold">Status</th>
-                      <th className="text-left px-3 py-2 font-semibold">Number of Tasks</th>
-                      <th className="text-left px-3 py-2 font-semibold">Estimated Time</th>
-                      <th className="text-right px-3 py-2 font-semibold">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {moduleAggregates.map(({ module, taskCount, estimatedTime }) => {
-                      const enabled = module.is_active ?? true
-                      return (
-                        <tr key={module.id} className="border-t border-border hover:bg-secondary/40 transition">
-                          <td className="px-3 py-2">
-                            <div>
-                              <p className="font-medium text-foreground">{module.name}</p>
-                              {module.description && (
-                                <p className="text-xs text-muted-foreground line-clamp-1">{module.description}</p>
-                              )}
-                            </div>
-                          </td>
-                          <td className="px-3 py-2">
-                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                              enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
-                            }`}>
-                              {enabled ? 'Enabled' : 'Disabled'}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2">{taskCount || 0}</td>
-                          <td className="px-3 py-2">{estimatedTime || 0}h</td>
-                          <td className="px-3 py-2">
-                            <div className="flex items-center justify-end">
-                              <Link
-                                href={projectModuleHref(
-                                  project,
-                                  module,
-                                  projectSummaries,
-                                  modules,
-                                )}
-                              >
-                                <Button size="sm" variant="outline">
-                                  <Eye className="w-4 h-4 mr-1" />
-                                  View
-                                </Button>
-                              </Link>
-                            </div>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+            )
+          })}
+        </div>
+      )}
 
-      {/* Add Module Modal */}
       {showAddModuleModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-card border border-border rounded-lg w-full max-w-md">
             <div className="flex items-center justify-between p-6 border-b border-border">
               <h3 className="text-lg font-semibold text-foreground">Add Module</h3>
-              <button 
-                onClick={() => setShowAddModuleModal(false)}
-                className="text-muted-foreground hover:text-foreground"
-              >
+              <button onClick={() => setShowAddModuleModal(false)} className="text-muted-foreground hover:text-foreground">
                 <X className="w-5 h-5" />
               </button>
             </div>
             <form onSubmit={handleAddModule} className="p-6 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-foreground mb-2">
-                  Module Name *
-                </label>
+                <label className="block text-sm font-medium text-foreground mb-2">Module Name *</label>
                 <input
                   type="text"
                   required
@@ -459,18 +468,10 @@ export default function ProjectDetailPage() {
                 />
               </div>
               <div className="flex items-center gap-4 pt-4 border-t border-border">
-                <Button
-                  type="submit"
-                  disabled={creatingModule || !newModuleName.trim()}
-                  className="flex-1 bg-primary"
-                >
+                <Button type="submit" disabled={creatingModule || !newModuleName.trim()} className="flex-1 bg-primary">
                   {creatingModule ? 'Creating...' : 'Create Module'}
                 </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setShowAddModuleModal(false)}
-                >
+                <Button type="button" variant="outline" onClick={() => setShowAddModuleModal(false)}>
                   Cancel
                 </Button>
               </div>
