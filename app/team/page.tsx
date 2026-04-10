@@ -377,7 +377,6 @@ export default function TeamPage() {
     if (!formData.full_name.trim()) errors.full_name = 'Full name is required'
     if (!formData.department_id) errors.department_id = 'Department is required'
     if (!formData.designation_id) errors.designation_id = 'Designation is required'
-    if (!formData.role) errors.designation_id = 'Selected designation is not mapped to a role'
     if (formData.password && formData.password.length < 8) errors.password = 'Password must be at least 8 characters'
     if (formData.password && formData.password !== formData.confirm_password) {
       errors.confirm_password = 'Passwords do not match'
@@ -395,12 +394,10 @@ export default function TeamPage() {
     !!formData.full_name.trim() &&
     !!formData.department_id &&
     !!formData.designation_id &&
-    !!formData.role &&
     (!formData.password || formData.password.length >= 8) &&
     (!formData.password || formData.password === formData.confirm_password) &&
     Number(formData.experience_years || 0) >= 0 &&
-    Number(formData.experience_years || 0) <= 50 &&
-    (!formData.reporting_manager_id || formData.reporting_manager_id !== user?.id)
+    Number(formData.experience_years || 0) <= 50
 
   const handleCreateMember = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -954,6 +951,7 @@ export default function TeamPage() {
                   >
                     <option value="">Select Manager</option>
                     {reportingManagerOptions
+                      .filter((lead) => lead.id !== user?.id)
                       .filter((lead) => {
                         const q = managerSearch.trim().toLowerCase()
                         if (!q) return true
