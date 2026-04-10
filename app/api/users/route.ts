@@ -86,6 +86,35 @@ export async function POST(request: NextRequest) {
       // Client admins can only create users for their own client
       clientId = ctx.clientId
     }
+
+    if (!clientId) {
+      return NextResponse.json({ error: 'Client is required' }, { status: 400 })
+    }
+
+    // Enforce one client_admin per client.
+    if (role_id) {
+      const { data: selectedRole } = await adminClient
+        .from('roles')
+        .select('id, name')
+        .eq('id', role_id)
+        .maybeSingle()
+
+      if (selectedRole?.name === 'client_admin') {
+        const { data: existingClientAdmin } = await adminClient
+          .from('team')
+          .select('id')
+          .eq('client_id', clientId)
+          .eq('role_id', role_id)
+          .limit(1)
+
+        if (existingClientAdmin && existingClientAdmin.length > 0) {
+          return NextResponse.json(
+            { error: 'A client already has a client admin. Only one client admin is allowed per client.' },
+            { status: 409 },
+          )
+        }
+      }
+    }
     
     // Check if email already exists
     const { data: { users: existingUsers } } = await adminClient.auth.admin.listUsers({ 

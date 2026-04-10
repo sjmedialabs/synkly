@@ -29,6 +29,9 @@ async function resolvePeopleTable(
 
 export async function GET() {
   try {
+    const ctx = await getAuthContext()
+    if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
     const adminClient = getAdminClient()
     const peopleTable = await resolvePeopleTable(adminClient)
     if (!peopleTable) {
@@ -94,7 +97,7 @@ export async function GET() {
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 
-    const adapted = (users || []).map((user) => {
+    let adapted = (users || []).map((user) => {
       const canonicalRole = resolveRole(user)
       return {
         ...user,
@@ -104,6 +107,16 @@ export async function GET() {
         permissions: canonicalRole ? ROLE_PERMISSIONS[canonicalRole] : [],
       }
     })
+
+    // Client admins and non-master users can only see their own client users.
+    if (!ctx.isMasterAdmin) {
+      if (ctx.clientId) {
+        adapted = adapted.filter((u: any) => u.client_id === ctx.clientId)
+      } else {
+        adapted = adapted.filter((u: any) => u.id === ctx.userId)
+      }
+      adapted = adapted.filter((u: any) => u.role !== 'master_admin')
+    }
 
     return NextResponse.json({ users: adapted })
   } catch (err: any) {
@@ -150,6 +163,8 @@ export async function POST(request: NextRequest) {
     const designation_id = body.designation_id ? String(body.designation_id) : null
     const reporting_manager_id = body.reporting_manager_id ? String(body.reporting_manager_id) : null
     let role = String(body.role || '').trim().toLowerCase() as RoleKey
+    const requestedClientId = body.client_id ? String(body.client_id) : null
+    const targetClientId = ctx.isMasterAdmin ? (requestedClientId || ctx.clientId || null) : (ctx.clientId || null)
     const password = body.password ? String(body.password) : ''
     const experience_years = Number(body.experience_years ?? 0)
     const skills = Array.isArray(body.skills)
@@ -204,6 +219,13 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       )
     }
+
+    if (role === 'master_admin' && !ctx.isMasterAdmin) {
+      return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
+    }
+    if (role === 'client_admin' && !targetClientId) {
+      return NextResponse.json({ error: 'Client is required for client admin user' }, { status: 400 })
+    }
     if (!Number.isFinite(experience_years) || experience_years < 0 || experience_years > 50) {
       return NextResponse.json({ error: 'experience_years must be between 0 and 50' }, { status: 400 })
     }
@@ -231,6 +253,32 @@ export async function POST(request: NextRequest) {
       if (existingDb) {
         return NextResponse.json({ error: 'Email already exists' }, { status: 409 })
       }
+
+      // Enforce one client_admin per client.
+      if (role === 'client_admin' && targetClientId) {
+        const { data: clientAdminRole } = await adminClient
+          .from('roles')
+          .select('id')
+          .eq('name', 'client_admin')
+          .maybeSingle()
+
+        if (clientAdminRole?.id) {
+          const { data: existingClientAdmin } = await adminClient
+            .from(peopleTable)
+            .select('id')
+            .eq('client_id', targetClientId)
+            .eq('role_id', clientAdminRole.id)
+            .neq('id', sessionUser.id)
+            .limit(1)
+
+          if (existingClientAdmin && existingClientAdmin.length > 0) {
+            return NextResponse.json(
+              { error: 'A client already has a client admin. Only one client admin is allowed per client.' },
+              { status: 409 },
+            )
+          }
+        }
+      }
     }
 
     const redirectTo = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/callback?next=/auth/set-password&type=invite`
@@ -247,6 +295,7 @@ export async function POST(request: NextRequest) {
       permissions: ROLE_PERMISSIONS[role],
       invited: true,
       invited_at: new Date().toISOString(),
+      client_id: targetClientId,
     }
 
     /**
@@ -322,6 +371,7 @@ export async function POST(request: NextRequest) {
       id: newUserId,
       email,
       full_name,
+      client_id: targetClientId,
       department,
       department_id,
       designation,

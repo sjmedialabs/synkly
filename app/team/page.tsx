@@ -17,6 +17,7 @@ type TeamMember = {
   department_id?: string | null
   department_name?: string | null
   division_id?: string | null
+  division_name?: string | null
   designation?: string | null | { id: string; name: string }
   designation_id?: string | null
   designation_name?: string | null
@@ -92,6 +93,42 @@ const memberDepartmentLabel = (m: TeamMember) =>
 
 const memberDesignationLabel = (m: TeamMember) =>
   displayLabel(m.designation) || m.designation_name || ''
+
+const memberDivisionLabel = (m: TeamMember) => m.division_name || ''
+
+const normalizeLabel = (value: string) => value.trim().toLowerCase()
+
+const isExecutionDepartment = (departmentName: string) => {
+  const normalized = normalizeLabel(departmentName)
+  return normalized.includes('execution layer')
+}
+
+const isExecutionOwnersDepartment = (departmentName: string) => {
+  const normalized = normalizeLabel(departmentName)
+  return normalized.includes('execution owners')
+}
+
+const isExecutionOwner = (member: TeamMember) => {
+  const designation = normalizeLabel(memberDesignationLabel(member))
+  const role = normalizeLabel(typeof member.role === 'string' ? member.role : '')
+  return (
+    designation === 'execution owner' ||
+    designation.includes('execution owner') ||
+    role === 'execution_owner' ||
+    role.includes('execution_owner') ||
+    role.includes('execution owner')
+  )
+}
+
+const isTopLevelCandidate = (member: TeamMember) => {
+  const role = resolveRole({
+    role: typeof member.role === 'string' ? member.role : null,
+    designation: memberDesignationLabel(member),
+  })
+  if (role === 'master_admin' || role === 'client_admin') return true
+  const designation = normalizeLabel(memberDesignationLabel(member))
+  return designation.includes('top level')
+}
 
 export default function TeamPage() {
   const supabase = createClient()
@@ -257,13 +294,45 @@ export default function TeamPage() {
     : 'member'
   const subjectRoleLevel =
     subjectRoleKey && roleLevel[subjectRoleKey] != null ? roleLevel[subjectRoleKey] : roleLevel.member
+  const selectedDepartmentName =
+    departments.find((d: MasterDataValue) => d.id === formData.department_id)?.name || formData.department || ''
 
-  // Anyone strictly higher in the role hierarchy can be a reporting manager (any department).
+  // Reporting manager must be hierarchically above and inside selected org slice.
   const reportingManagerOptions = teamLeads
     .filter((lead) => {
       if (!lead.is_active) return false
+
+      // Execution Owners department -> Top Level users.
+      if (selectedDepartmentName && isExecutionOwnersDepartment(selectedDepartmentName)) {
+        return isTopLevelCandidate(lead)
+      }
+
+      // Execution Layer departments -> Execution Owners.
+      if (selectedDepartmentName && isExecutionDepartment(selectedDepartmentName)) {
+        return isExecutionOwner(lead)
+      }
+
       const mgrLevel = leadRoleLevel(lead)
       if (mgrLevel <= subjectRoleLevel) return false
+
+      // Match by IDs when available, otherwise fallback to label matching.
+      if (formData.department_id) {
+        const sameDepartmentById = lead.department_id === formData.department_id
+        const sameDepartmentByName =
+          !!selectedDepartmentName &&
+          normalizeLabel(memberDepartmentLabel(lead)) === normalizeLabel(selectedDepartmentName)
+        if (!sameDepartmentById && !sameDepartmentByName) return false
+      }
+
+      if (formData.division_id) {
+        const selectedDivisionName = divisions.find((d) => d.id === formData.division_id)?.name || ''
+        const sameDivisionById = lead.division_id === formData.division_id
+        const sameDivisionByName =
+          !!selectedDivisionName &&
+          normalizeLabel(memberDivisionLabel(lead)) === normalizeLabel(selectedDivisionName)
+        if (!sameDivisionById && !sameDivisionByName) return false
+      }
+
       return true
     })
     .sort(
@@ -294,17 +363,32 @@ export default function TeamPage() {
     fetchMappedRole()
   }, [formData.designation_id])
 
-  // Cascading divisions: when department changes, reload divisions filtered by parent_id
+  // Cascading divisions: when department changes, resolve via department_division_map.
   useEffect(() => {
     if (!formData.department_id) {
       return
     }
     async function loadCascadingDivisions() {
       try {
-        const res = await fetch(`/api/master-data/values?type=division&parent_id=${formData.department_id}`)
-        if (!res.ok) return
-        const data = await res.json()
-        const safeDivs = (data.values || []).filter((d: any) => d?.id && d?.name)
+        const [mapRes, allDivRes] = await Promise.all([
+          fetch('/api/master-data/values?type=department_division_map'),
+          fetch('/api/master-data/values?type=division'),
+        ])
+        if (!mapRes.ok || !allDivRes.ok) return
+
+        const mapJson = await mapRes.json()
+        const allDivJson = await allDivRes.json()
+        const mapRows = (mapJson.values || []).filter((v: any) => v?.name)
+        const allDivisions = (allDivJson.values || []).filter((d: any) => d?.id && d?.name)
+
+        const divisionIdsForDepartment = new Set(
+          mapRows
+            .map((row: any) => String(row.name || '').split(':'))
+            .filter(([deptId, divisionId]: string[]) => deptId === formData.department_id && !!divisionId)
+            .map(([, divisionId]: string[]) => divisionId),
+        )
+
+        const safeDivs = allDivisions.filter((d: any) => divisionIdsForDepartment.has(d.id))
         setDivisions(safeDivs)
       } catch {}
     }
@@ -327,6 +411,22 @@ export default function TeamPage() {
     }
     loadCascadingDesignations()
   }, [formData.division_id])
+
+  // Keep reporting manager in sync with hierarchy filters.
+  useEffect(() => {
+    if (!formData.reporting_manager_id) return
+    const valid = reportingManagerOptions.some((m) => m.id === formData.reporting_manager_id)
+    if (!valid) {
+      setFormData((prev) => ({ ...prev, reporting_manager_id: '' }))
+    }
+  }, [
+    formData.reporting_manager_id,
+    formData.department_id,
+    formData.division_id,
+    formData.designation_id,
+    formData.role,
+    reportingManagerOptions,
+  ])
 
   // Filter team members based on search and filters
   useEffect(() => {
@@ -586,6 +686,23 @@ export default function TeamPage() {
 
   const openEditModal = (member: TeamMember) => {
     setSelectedMember(member)
+    const departmentName = memberDepartmentLabel(member) || ''
+    const designationName = memberDesignationLabel(member) || ''
+    const divisionName = memberDivisionLabel(member) || ''
+
+    const resolvedDepartmentId =
+      member.department_id ||
+      departments.find((d: MasterDataValue) => normalizeLabel(d.name) === normalizeLabel(departmentName))?.id ||
+      ''
+    const resolvedDivisionId =
+      member.division_id ||
+      divisions.find((d: MasterDataValue) => normalizeLabel(d.name) === normalizeLabel(divisionName))?.id ||
+      ''
+    const resolvedDesignationId =
+      member.designation_id ||
+      designations.find((d: MasterDataValue) => normalizeLabel(d.name) === normalizeLabel(designationName))?.id ||
+      ''
+
     const resolvedMemberRole =
       resolveRole({
         role: typeof member.role === 'string' ? member.role : null,
@@ -594,11 +711,11 @@ export default function TeamPage() {
     setFormData({
       email: member.email,
       full_name: member.full_name || '',
-      department: memberDepartmentLabel(member) || '',
-      department_id: member.department_id || '',
-      division_id: member.division_id || '',
-      designation: memberDesignationLabel(member) || '',
-      designation_id: member.designation_id || '',
+      department: departmentName,
+      department_id: resolvedDepartmentId,
+      division_id: resolvedDivisionId,
+      designation: designationName,
+      designation_id: resolvedDesignationId,
       role: resolvedMemberRole,
       experience_years: member.experience_years?.toString() || '',
       skillset: member.skillset?.join(', ') || '',
@@ -958,7 +1075,11 @@ export default function TeamPage() {
                         return (lead.full_name || '').toLowerCase().includes(q) || lead.email.toLowerCase().includes(q)
                       })
                       .map((lead) => (
-                      <option key={lead.id} value={lead.id}>{lead.full_name || lead.email}</option>
+                      <option key={lead.id} value={lead.id}>
+                        {lead.full_name || lead.email}
+                        {memberDepartmentLabel(lead) ? ` - ${memberDepartmentLabel(lead)}` : ''}
+                        {memberDivisionLabel(lead) ? ` / ${memberDivisionLabel(lead)}` : ''}
+                      </option>
                     ))}
                   </select>
                   {validationErrors.reporting_manager_id && <p className="text-xs text-destructive mt-1">{validationErrors.reporting_manager_id}</p>}
@@ -1263,7 +1384,11 @@ export default function TeamPage() {
                     {reportingManagerOptions
                       .filter((l) => l.id !== selectedMember?.id)
                       .map((lead) => (
-                      <option key={lead.id} value={lead.id}>{lead.full_name || lead.email}</option>
+                      <option key={lead.id} value={lead.id}>
+                        {lead.full_name || lead.email}
+                        {memberDepartmentLabel(lead) ? ` - ${memberDepartmentLabel(lead)}` : ''}
+                        {memberDivisionLabel(lead) ? ` / ${memberDivisionLabel(lead)}` : ''}
+                      </option>
                     ))}
                   </select>
                 </div>

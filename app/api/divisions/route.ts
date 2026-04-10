@@ -27,11 +27,19 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ error: error.message }, { status: 500 })
       }
       // Fallback for environments where dedicated `divisions` table is missing:
-      // reuse master_data_values(type=division), which is already used by settings.
+      // reuse master_data_values(type_id -> master_data_types.name='division'), which is used by settings.
+      const typeRes = await ctx.adminClient
+        .from('master_data_types')
+        .select('id')
+        .eq('name', 'division')
+        .maybeSingle()
+      if (typeRes.error || !typeRes.data?.id) {
+        return NextResponse.json({ error: "Missing master_data_types row for 'division'" }, { status: 500 })
+      }
       const { data: md, error: mdErr } = await ctx.adminClient
         .from('master_data_values')
         .select('id, name, parent_id, is_active, created_at, updated_at')
-        .eq('type', 'division')
+        .eq('type_id', typeRes.data.id)
         .eq('is_active', true)
         .order('name', { ascending: true })
       const filteredRows =

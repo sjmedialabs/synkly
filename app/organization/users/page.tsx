@@ -102,10 +102,13 @@ export default function OrganizationUsersPage() {
           roles (name)
         `)
         .eq('client_id', cId)
+        .neq('roles.name', 'master_admin')
         .order('full_name', { ascending: true })
 
       if (usersData) {
-        setUsers(usersData.map(u => ({
+        const sanitized = usersData
+          .filter((u: any) => ((u.roles as any)?.name as string | undefined) !== 'master_admin')
+        setUsers(sanitized.map(u => ({
           ...u,
           role_name: (u.roles as any)?.name as RoleKey | null,
         })))

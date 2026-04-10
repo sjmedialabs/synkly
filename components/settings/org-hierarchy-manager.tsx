@@ -33,6 +33,7 @@ const formatName = (name: string) =>
 export function OrgHierarchyManager() {
   const [departments, setDepartments] = useState<MasterDataValue[]>([])
   const [divisions, setDivisions] = useState<MasterDataValue[]>([])
+  const [divisionMappings, setDivisionMappings] = useState<MasterDataValue[]>([])
   const [designations, setDesignations] = useState<MasterDataValue[]>([])
   const [roles, setRoles] = useState<Role[]>([])
   const [designationRoleMappings, setDesignationRoleMappings] = useState<DesignationRoleMapping[]>([])
@@ -56,9 +57,10 @@ export function OrgHierarchyManager() {
 
   async function loadAll() {
     try {
-      const [deptRes, divRes, desigRes, rolesRes, mappingsRes] = await Promise.all([
+      const [deptRes, divRes, divMapRes, desigRes, rolesRes, mappingsRes] = await Promise.all([
         fetch('/api/master-data/values?type=department'),
         fetch('/api/master-data/values?type=division'),
+        fetch('/api/master-data/values?type=department_division_map'),
         fetch('/api/master-data/values?type=designation'),
         fetch('/api/roles'),
         fetch('/api/designation-roles'),
@@ -71,6 +73,10 @@ export function OrgHierarchyManager() {
       if (divRes.ok) {
         const d = await divRes.json()
         setDivisions(uniqueById((d.values || []).filter((v: any) => v?.id && v?.name)))
+      }
+      if (divMapRes.ok) {
+        const d = await divMapRes.json()
+        setDivisionMappings(uniqueById((d.values || []).filter((v: any) => v?.id && v?.name)))
       }
       if (desigRes.ok) {
         const d = await desigRes.json()
@@ -101,7 +107,13 @@ export function OrgHierarchyManager() {
   }
 
   function getDivisionsFor(departmentId: string) {
-    return divisions.filter((d) => d.parent_id === departmentId)
+    const mappedIds = new Set(
+      divisionMappings
+        .map((m) => String(m.name || '').split(':'))
+        .filter(([deptId, divisionId]) => deptId === departmentId && !!divisionId)
+        .map(([, divisionId]) => divisionId),
+    )
+    return divisions.filter((d) => mappedIds.has(d.id))
   }
 
   function getDesignationsFor(divisionId: string) {
@@ -112,33 +124,40 @@ export function OrgHierarchyManager() {
     return designationRoleMappings.find((m) => m.designation_id === designationId)
   }
 
-  /** Which department (if any) owns this division? */
-  function getDivisionOwner(divisionId: string): string | null {
-    const div = divisions.find((d) => d.id === divisionId)
-    return div?.parent_id ?? null
+  function getMappingId(departmentId: string, divisionId: string): string | null {
+    const hit = divisionMappings.find((m) => m.name === `${departmentId}:${divisionId}`)
+    return hit?.id || null
   }
 
   async function handleToggleDivision(divisionId: string, departmentId: string, checked: boolean) {
     setError(null)
     try {
-      const res = await fetch('/api/master-data/values', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: divisionId,
-          parent_id: checked ? departmentId : null,
-        }),
-      })
-      if (!res.ok) throw new Error((await res.json()).error || 'Failed to update')
-      const data = await res.json()
-      const updated = data.value
+      const mapName = `${departmentId}:${divisionId}`
+      const existingMapId = getMappingId(departmentId, divisionId)
 
-      // Update local state
-      setDivisions((prev) =>
-        prev.map((d) =>
-          d.id === divisionId ? { ...d, parent_id: checked ? departmentId : null } : d,
-        ),
-      )
+      if (checked) {
+        if (existingMapId) return
+        const createRes = await fetch('/api/master-data/values', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'department_division_map',
+            name: mapName,
+            parent_id: null,
+          }),
+        })
+        if (!createRes.ok) throw new Error((await createRes.json()).error || 'Failed to assign division')
+        const createData = await createRes.json()
+        if (createData.value) {
+          setDivisionMappings((prev) => uniqueById([...prev, createData.value]))
+        }
+        return
+      }
+
+      if (!existingMapId) return
+      const res = await fetch(`/api/master-data/values?id=${existingMapId}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error((await res.json()).error || 'Failed to unassign division')
+      setDivisionMappings((prev) => prev.filter((m) => m.id !== existingMapId))
     } catch (err: any) {
       setError(err.message)
     }
@@ -346,10 +365,7 @@ export function OrgHierarchyManager() {
                               </div>
                             ) : (
                               divisions.map((div) => {
-                                const isAssigned = div.parent_id === dept.id
-                                const otherOwner = div.parent_id && div.parent_id !== dept.id
-                                  ? departments.find((d) => d.id === div.parent_id)
-                                  : null
+                                const isAssigned = !!getMappingId(dept.id, div.id)
 
                                 return (
                                   <label
@@ -363,11 +379,6 @@ export function OrgHierarchyManager() {
                                       }
                                     />
                                     <span className="text-sm text-foreground flex-1">{div.name}</span>
-                                    {otherOwner && (
-                                      <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-                                        {otherOwner.name}
-                                      </span>
-                                    )}
                                     {isAssigned && (
                                       <Check className="w-3 h-3 text-emerald-500" />
                                     )}

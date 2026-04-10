@@ -47,6 +47,8 @@ export function RolesPermissionsManager() {
   const [roles, setRoles] = useState<Role[]>([])
   const [selectedRole, setSelectedRole] = useState<Role | null>(null)
   const [editPermissions, setEditPermissions] = useState<Record<string, Record<string, boolean>>>({})
+  const [editRoleName, setEditRoleName] = useState('')
+  const [editRoleDesc, setEditRoleDesc] = useState('')
   const [isEditing, setIsEditing] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -78,6 +80,8 @@ export function RolesPermissionsManager() {
   function selectRole(role: Role) {
     setSelectedRole(role)
     setEditPermissions(role.permissions || {})
+    setEditRoleName(role.name)
+    setEditRoleDesc(role.description || '')
     setIsEditing(false)
   }
 
@@ -113,13 +117,26 @@ export function RolesPermissionsManager() {
 
   async function handleSave() {
     if (!selectedRole) return
+    const normalizedName = editRoleName.trim().toLowerCase().replace(/\s+/g, '_')
+    if (!normalizedName) {
+      setError('Role name is required')
+      return
+    }
+
     setSaving(true)
     setError(null)
     try {
+      const payload: Record<string, unknown> = {
+        id: selectedRole.id,
+        name: normalizedName,
+        permissions: editPermissions,
+      }
+      payload.description = editRoleDesc.trim() || null
+
       const res = await fetch('/api/roles', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: selectedRole.id, permissions: editPermissions }),
+        body: JSON.stringify(payload),
       })
       if (!res.ok) throw new Error((await res.json()).error || 'Failed to save')
       const data = await res.json()
@@ -295,10 +312,10 @@ export function RolesPermissionsManager() {
             <div className="flex items-center justify-between">
               <div>
                 <CardTitle className="text-lg">
-                  {selectedRole ? `${formatName(selectedRole.name)} Permissions` : 'Select a Role'}
+                  {selectedRole ? `${formatName(selectedRole.name)} Role Settings` : 'Select a Role'}
                 </CardTitle>
                 <CardDescription>
-                  {selectedRole?.description || 'Configure module-level permissions'}
+                  {selectedRole?.description || 'Configure role details and module-level permissions'}
                 </CardDescription>
               </div>
               {selectedRole && (
@@ -314,6 +331,8 @@ export function RolesPermissionsManager() {
                         variant="outline"
                         onClick={() => {
                           setEditPermissions(selectedRole.permissions || {})
+                          setEditRoleName(selectedRole.name)
+                          setEditRoleDesc(selectedRole.description || '')
                           setIsEditing(false)
                         }}
                       >
@@ -341,6 +360,30 @@ export function RolesPermissionsManager() {
             {selectedRole ? (
               <div className="overflow-x-auto">
                 <div className="min-w-[600px]">
+                  {isEditing && (
+                    <div className="mb-4 rounded-lg border border-border p-4 space-y-3">
+                      <p className="text-sm font-medium">Role Details</p>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="space-y-1">
+                          <p className="text-xs text-muted-foreground">Role Name</p>
+                          <Input
+                            value={editRoleName}
+                            onChange={(e) => setEditRoleName(e.target.value)}
+                            placeholder="Role name"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <p className="text-xs text-muted-foreground">Description</p>
+                          <Input
+                            value={editRoleDesc}
+                            onChange={(e) => setEditRoleDesc(e.target.value)}
+                            placeholder="Description (optional)"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Header row */}
                   <div className="grid gap-2 mb-3" style={{ gridTemplateColumns: `160px repeat(${PERMISSION_ACTIONS.length}, 1fr)` }}>
                     <div className="text-sm font-semibold text-foreground">Module</div>
