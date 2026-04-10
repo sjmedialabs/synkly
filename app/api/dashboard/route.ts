@@ -125,9 +125,6 @@ export async function GET() {
       }
     }
 
-    const recentProjects = projects.slice(0, 4)
-    const projectLinkSummaries = projects.map((p) => ({ id: p.id, name: p.name }))
-
     const stats = {
       projects: projects.length,
       activeProjects: projects.filter((p) => p.status === 'active').length,
@@ -142,8 +139,6 @@ export async function GET() {
       role,
       status,
       stats,
-      recentProjects,
-      projectLinkSummaries,
       myTasks,
     }
     apiCache.set(cacheKey, payload)

@@ -122,6 +122,14 @@ function stripTasksUpdateColumnFromError(
     delete payload.estimation
     return true
   }
+  if (msg.includes('end_date') && 'end_date' in payload) {
+    delete payload.end_date
+    return true
+  }
+  if (msg.includes('completed_at') && 'completed_at' in payload) {
+    delete payload.completed_at
+    return true
+  }
   return false
 }
 
@@ -146,6 +154,12 @@ export async function POST(request: NextRequest) {
     const estimatedHours =
       estimatedHoursRaw === undefined || estimatedHoursRaw === '' ? undefined : Number(estimatedHoursRaw)
     const month = body.month != null && body.month !== '' ? String(body.month) : undefined
+    const assignerEndDate =
+      body.end_date != null && String(body.end_date).trim() !== ''
+        ? String(body.end_date).trim().slice(0, 10)
+        : body.assigner_end_date != null && String(body.assigner_end_date).trim() !== ''
+          ? String(body.assigner_end_date).trim().slice(0, 10)
+          : undefined
     if (!canAccessAll(actorRole) && !can(actorRole, 'ASSIGN_TASK')) {
       return NextResponse.json({ error: 'Not allowed to assign tasks' }, { status: 403 })
     }
@@ -330,6 +344,10 @@ export async function POST(request: NextRequest) {
 
     if (carriedFromSprintId) {
       updateData.carried_from_sprint_id = carriedFromSprintId
+    }
+
+    if (assignerEndDate) {
+      updateData.end_date = assignerEndDate
     }
 
     console.log('[v0 task assign] Final update data:', updateData)

@@ -218,12 +218,30 @@ export async function PATCH(request: NextRequest) {
       }
     }
 
-    const updateRes = await adminClient
+    const completedPatch =
+      status === 'done'
+        ? { completed_at: new Date().toISOString() }
+        : { completed_at: null as string | null }
+
+    let updateRes = await adminClient
       .from('tasks')
-      .update({ status })
+      .update({ status, ...completedPatch })
       .eq('id', taskId)
       .select('*')
       .single()
+
+    if (
+      updateRes.error?.code === 'PGRST204' &&
+      String(updateRes.error.message || '').includes('completed_at')
+    ) {
+      updateRes = await adminClient
+        .from('tasks')
+        .update({ status })
+        .eq('id', taskId)
+        .select('*')
+        .single()
+    }
+
     if (updateRes.error) return NextResponse.json({ error: updateRes.error.message }, { status: 500 })
     return NextResponse.json({ task: updateRes.data })
   } catch (err: any) {
@@ -286,31 +304,36 @@ export async function POST(request: NextRequest) {
     const estimate = body.estimation != null && body.estimation !== '' ? Number(body.estimation) : 0
     const startDate = body.start_date || null
     const endDate = body.end_date || null
+    const documentUrl =
+      body.document_url != null && String(body.document_url).trim() !== ''
+        ? String(body.document_url).trim()
+        : null
+    const docFields = documentUrl ? { document_url: documentUrl } : {}
 
     const payloadAttempts: Record<string, unknown>[] = [
-      { ...withCreator, estimation: estimate, start_date: startDate, end_date: endDate },
-      { ...withCreator, estimated_hours: estimate, start_date: startDate, end_date: endDate },
-      { ...withCreator, start_date: startDate, end_date: endDate },
-      { ...withCreator, estimation: estimate, start_date: startDate },
-      { ...withCreator, estimated_hours: estimate, start_date: startDate },
-      { ...withCreator, estimation: estimate, end_date: endDate },
-      { ...withCreator, estimated_hours: estimate, end_date: endDate },
-      { ...withCreator, start_date: startDate },
-      { ...withCreator, end_date: endDate },
-      { ...withCreator, estimation: estimate },
-      { ...withCreator, estimated_hours: estimate },
-      { ...base, estimation: estimate, start_date: startDate, end_date: endDate },
-      { ...base, estimated_hours: estimate, start_date: startDate, end_date: endDate },
-      { ...base, start_date: startDate, end_date: endDate },
-      { ...base, estimation: estimate, start_date: startDate },
-      { ...base, estimated_hours: estimate, start_date: startDate },
-      { ...base, estimation: estimate, end_date: endDate },
-      { ...base, estimated_hours: estimate, end_date: endDate },
-      { ...base, start_date: startDate },
-      { ...base, end_date: endDate },
-      { ...base, estimation: estimate },
-      { ...base, estimated_hours: estimate },
-      { ...base },
+      { ...withCreator, ...docFields, estimation: estimate, start_date: startDate, end_date: endDate },
+      { ...withCreator, ...docFields, estimated_hours: estimate, start_date: startDate, end_date: endDate },
+      { ...withCreator, ...docFields, start_date: startDate, end_date: endDate },
+      { ...withCreator, ...docFields, estimation: estimate, start_date: startDate },
+      { ...withCreator, ...docFields, estimated_hours: estimate, start_date: startDate },
+      { ...withCreator, ...docFields, estimation: estimate, end_date: endDate },
+      { ...withCreator, ...docFields, estimated_hours: estimate, end_date: endDate },
+      { ...withCreator, ...docFields, start_date: startDate },
+      { ...withCreator, ...docFields, end_date: endDate },
+      { ...withCreator, ...docFields, estimation: estimate },
+      { ...withCreator, ...docFields, estimated_hours: estimate },
+      { ...base, ...docFields, estimation: estimate, start_date: startDate, end_date: endDate },
+      { ...base, ...docFields, estimated_hours: estimate, start_date: startDate, end_date: endDate },
+      { ...base, ...docFields, start_date: startDate, end_date: endDate },
+      { ...base, ...docFields, estimation: estimate, start_date: startDate },
+      { ...base, ...docFields, estimated_hours: estimate, start_date: startDate },
+      { ...base, ...docFields, estimation: estimate, end_date: endDate },
+      { ...base, ...docFields, estimated_hours: estimate, end_date: endDate },
+      { ...base, ...docFields, start_date: startDate },
+      { ...base, ...docFields, end_date: endDate },
+      { ...base, ...docFields, estimation: estimate },
+      { ...base, ...docFields, estimated_hours: estimate },
+      { ...base, ...docFields },
     ]
 
     let created: any = null

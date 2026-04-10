@@ -7,18 +7,15 @@ import Link from 'next/link'
 import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { 
-  FolderKanban, 
-  CheckSquare, 
-  Users, 
-  Target, 
-  Plus,
-  ArrowRight,
+import {
+  FolderKanban,
+  CheckSquare,
+  Users,
+  Target,
   Clock,
-  AlertCircle
+  AlertCircle,
 } from 'lucide-react'
 import { ROLE_LABELS, type RoleKey } from '@/lib/rbac'
-import { projectHref } from '@/lib/slug'
 
 interface Stats {
   projects: number
@@ -27,13 +24,6 @@ interface Stats {
   pendingTasks: number
   teamMembers: number
   milestones: number
-}
-
-interface Project {
-  id: string
-  name: string
-  status: string
-  description: string | null
 }
 
 interface Task {
@@ -58,8 +48,6 @@ export default function DashboardPage() {
     teamMembers: 0,
     milestones: 0,
   })
-  const [recentProjects, setRecentProjects] = useState<Project[]>([])
-  const [projectLinkSummaries, setProjectLinkSummaries] = useState<{ id: string; name: string | null }[]>([])
   const [myTasks, setMyTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -82,8 +70,6 @@ export default function DashboardPage() {
       setUserName(d.full_name || user.email?.split('@')[0] || 'User')
       setUserRole(d.role ?? null)
       setStats(d.stats)
-      setRecentProjects(d.recentProjects || [])
-      setProjectLinkSummaries(d.projectLinkSummaries || [])
       setMyTasks(d.myTasks || [])
       setLoading(false)
     }
@@ -181,55 +167,7 @@ export default function DashboardPage() {
         </Card>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        {/* Recent Projects */}
-        <Card className="lg:col-span-2">
-          <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle>Recent Projects</CardTitle>
-            <Link href="/projects">
-              <Button variant="ghost" size="sm">
-                View All
-                <ArrowRight className="w-4 h-4 ml-2" />
-              </Button>
-            </Link>
-          </CardHeader>
-          <CardContent>
-            {recentProjects.length === 0 ? (
-              <div className="text-center py-8">
-                <FolderKanban className="w-12 h-12 mx-auto mb-4 text-muted-foreground" />
-                <p className="text-muted-foreground mb-4">No projects yet</p>
-                <Link href="/projects/new">
-                  <Button className="bg-accent hover:bg-accent/90 text-accent-foreground">
-                    <Plus className="w-4 h-4 mr-2" />
-                    Create First Project
-                  </Button>
-                </Link>
-              </div>
-            ) : (
-              <div className="grid gap-4 md:grid-cols-2">
-                {recentProjects.map((project) => (
-                  <Link key={project.id} href={projectHref(project, projectLinkSummaries)}>
-                    <div className="p-4 border border-border rounded-lg hover:shadow-md transition-shadow cursor-pointer">
-                      <h5 className="font-semibold text-foreground mb-1">{project.name}</h5>
-                      <p className="text-sm text-muted-foreground mb-3 line-clamp-1">
-                        {project.description || 'No description'}
-                      </p>
-                      <span className={`px-2 py-1 rounded text-xs font-medium capitalize ${
-                        project.status === 'active' ? 'bg-primary/10 text-primary' :
-                        project.status === 'completed' ? 'bg-green-500/10 text-green-600' :
-                        'bg-muted text-muted-foreground'
-                      }`}>
-                        {project.status}
-                      </span>
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* My Tasks */}
+      <div className="max-w-2xl">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>My Tasks</CardTitle>

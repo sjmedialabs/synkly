@@ -29,12 +29,25 @@ type TaskRecord = {
   id: string
   title: string
   status: string
+  description?: string | null
+  document_url?: string | null
+  completed_at?: string | null
   assignee_id?: string | null
   assignee?: { full_name: string | null; email: string } | null
   estimation?: number | null
   estimated_hours?: number | null
   start_date?: string | null
   end_date?: string | null
+}
+
+const TASK_ATTACHMENT_ACCEPT = 'image/*,.pdf,application/pdf'
+
+function isAllowedTaskAttachmentFile(file: File): boolean {
+  const t = (file.type || '').toLowerCase()
+  if (t.startsWith('image/')) return true
+  if (t === 'application/pdf') return true
+  const lower = file.name.toLowerCase()
+  return lower.endsWith('.pdf')
 }
 
 export default function ProjectModuleDetailPage() {
@@ -65,9 +78,13 @@ export default function ProjectModuleDetailPage() {
   const [taskAttachments, setTaskAttachments] = useState<File[]>([])
   const [taskLinks, setTaskLinks] = useState<string[]>([])
   const [newLink, setNewLink] = useState('')
+  const [editTaskAttachments, setEditTaskAttachments] = useState<File[]>([])
+  const [editTaskLinks, setEditTaskLinks] = useState<string[]>([])
+  const [editNewLink, setEditNewLink] = useState('')
   const [newTask, setNewTask] = useState({
     title: '',
     description: '',
+    document_url: '',
     sprint_id: '',
     assignee_id: '',
     estimation: '',
@@ -77,6 +94,7 @@ export default function ProjectModuleDetailPage() {
   const [editTask, setEditTask] = useState({
     title: '',
     description: '',
+    document_url: '',
     sprint_id: '',
     assignee_id: '',
     estimation: '',
@@ -243,6 +261,47 @@ export default function ProjectModuleDetailPage() {
     0,
   )
 
+  async function uploadTaskAttachments(
+    taskId: string,
+    files: File[],
+    linkUrls: string[],
+  ): Promise<string | null> {
+    let firstUrl: string | null = null
+    for (const file of files) {
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('entity_type', 'task')
+      formData.append('entity_id', taskId)
+      const res = await fetch('/api/attachments', { method: 'POST', body: formData })
+      let j: { attachment?: { url?: string | null } } = {}
+      try {
+        j = await res.json()
+      } catch {
+        j = {}
+      }
+      const u = j.attachment?.url
+      if (typeof u === 'string' && u.trim() && !firstUrl) firstUrl = u.trim()
+    }
+    for (const url of linkUrls) {
+      const res = await fetch('/api/attachments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entity_type: 'task', entity_id: taskId, url }),
+      })
+      let j: { attachment?: { url?: string | null } } = {}
+      try {
+        j = await res.json()
+      } catch {
+        j = {}
+      }
+      const u = (typeof j.attachment?.url === 'string' && j.attachment.url.trim()
+        ? j.attachment.url.trim()
+        : null) || url.trim()
+      if (u && !firstUrl) firstUrl = u
+    }
+    return firstUrl
+  }
+
   const fetchTasks = async () => {
     if (!module?.id) return
     const tasksRes = await supabase
@@ -261,6 +320,7 @@ export default function ProjectModuleDetailPage() {
     if (!newTask.title.trim() || !module) return
     setCreatingTask(true)
     try {
+      const docFromField = newTask.document_url.trim() || null
       const response = await fetch('/api/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -269,12 +329,13 @@ export default function ProjectModuleDetailPage() {
           description: newTask.description.trim() || null,
           module_id: module.id,
           project_id: module.project_id,
-          sprint_id: newTask.sprint_id,
+          sprint_id: newTask.sprint_id || null,
           assignee_id: newTask.assignee_id || null,
           estimation: newTask.estimation ? Number(newTask.estimation) : 0,
           start_date: newTask.start_date || null,
           end_date: newTask.end_date || null,
           status: 'todo',
+          ...(docFromField ? { document_url: docFromField } : {}),
         }),
       })
       const result = await response.json()
@@ -282,8 +343,16 @@ export default function ProjectModuleDetailPage() {
         throw new Error(result?.error || 'Failed to create task')
       }
 
-      if (result.task?.id && (taskAttachments.length > 0 || taskLinks.length > 0)) {
-        await uploadAttachments(result.task.id)
+      const taskId = result.task?.id as string | undefined
+      if (taskId && (taskAttachments.length > 0 || taskLinks.length > 0)) {
+        const uploadedFirst = await uploadTaskAttachments(taskId, taskAttachments, taskLinks)
+        if (!docFromField && uploadedFirst) {
+          await fetch(`/api/tasks/${taskId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_url: uploadedFirst }),
+          })
+        }
       }
       await fetchTasks()
       setShowCreateTaskModal(false)
@@ -293,6 +362,7 @@ export default function ProjectModuleDetailPage() {
       setNewTask({
         title: '',
         description: '',
+        document_url: '',
         sprint_id: '',
         assignee_id: '',
         estimation: '',
@@ -335,8 +405,22 @@ export default function ProjectModuleDetailPage() {
   }
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || [])
+    const files = Array.from(e.target.files || []).filter(isAllowedTaskAttachmentFile)
+    const dropped = Array.from(e.target.files || []).length - files.length
+    if (dropped > 0) {
+      alert('Only images and PDF files are allowed.')
+    }
     setTaskAttachments((prev) => [...prev, ...files])
+    e.target.value = ''
+  }
+
+  const handleEditFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []).filter(isAllowedTaskAttachmentFile)
+    const dropped = Array.from(e.target.files || []).length - files.length
+    if (dropped > 0) {
+      alert('Only images and PDF files are allowed.')
+    }
+    setEditTaskAttachments((prev) => [...prev, ...files])
     e.target.value = ''
   }
 
@@ -347,35 +431,22 @@ export default function ProjectModuleDetailPage() {
     setNewLink('')
   }
 
-  const uploadAttachments = async (taskId: string) => {
-    for (const file of taskAttachments) {
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('entity_type', 'task')
-      formData.append('entity_id', taskId)
-      await fetch('/api/attachments', { method: 'POST', body: formData })
-    }
-    for (const url of taskLinks) {
-      await fetch('/api/attachments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entity_type: 'task', entity_id: taskId, url }),
-      })
-    }
-  }
-
   const openEditTaskModal = (task: TaskRecord) => {
     setEditingTaskId(task.id)
     setEditTask({
       title: task.title || '',
-      description: (task as any).description || '',
-      sprint_id: (task as any).sprint_id || '',
+      description: task.description || '',
+      document_url: task.document_url || '',
+      sprint_id: (task as { sprint_id?: string }).sprint_id || '',
       assignee_id: task.assignee_id || '',
       estimation: String(task.estimation ?? task.estimated_hours ?? ''),
       start_date: task.start_date || '',
       end_date: task.end_date || '',
       status: task.status || 'todo',
     })
+    setEditTaskAttachments([])
+    setEditTaskLinks([])
+    setEditNewLink('')
     setShowEditTaskModal(true)
   }
 
@@ -390,6 +461,7 @@ export default function ProjectModuleDetailPage() {
         body: JSON.stringify({
           title: editTask.title.trim(),
           description: editTask.description.trim() || null,
+          document_url: editTask.document_url.trim() || null,
           sprint_id: editTask.sprint_id || null,
           assignee_id: editTask.assignee_id || null,
           estimation: editTask.estimation ? Number(editTask.estimation) : 0,
@@ -400,6 +472,22 @@ export default function ProjectModuleDetailPage() {
       })
       const result = await response.json()
       if (!response.ok) throw new Error(result?.error || 'Failed to update task')
+
+      const docField = editTask.document_url.trim()
+      if (editingTaskId && (editTaskAttachments.length > 0 || editTaskLinks.length > 0)) {
+        const uploadedFirst = await uploadTaskAttachments(
+          editingTaskId,
+          editTaskAttachments,
+          editTaskLinks,
+        )
+        if (!docField && uploadedFirst) {
+          await fetch(`/api/tasks/${editingTaskId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document_url: uploadedFirst }),
+          })
+        }
+      }
 
       await fetchTasks()
       setShowEditTaskModal(false)
@@ -467,7 +555,8 @@ export default function ProjectModuleDetailPage() {
                     <th className="text-left px-3 py-2">Assignee</th>
                     <th className="text-left px-3 py-2">Estimation</th>
                     <th className="text-left px-3 py-2">Start Date</th>
-                    <th className="text-left px-3 py-2">End Date</th>
+                    <th className="text-left px-3 py-2">Target End</th>
+                    <th className="text-left px-3 py-2">Completed</th>
                     <th className="text-right px-3 py-2">Actions</th>
                   </tr>
                 </thead>
@@ -480,6 +569,9 @@ export default function ProjectModuleDetailPage() {
                       <td className="px-3 py-2">{Number(task.estimation ?? task.estimated_hours ?? 0)}h</td>
                       <td className="px-3 py-2">{task.start_date ? new Date(task.start_date).toLocaleDateString() : '—'}</td>
                       <td className="px-3 py-2">{task.end_date ? new Date(task.end_date).toLocaleDateString() : '—'}</td>
+                      <td className="px-3 py-2">
+                        {task.completed_at ? new Date(task.completed_at).toLocaleString() : '—'}
+                      </td>
                       <td className="px-3 py-2 text-right">
                         <Button size="sm" variant="outline" onClick={() => openEditTaskModal(task)}>
                           <Pencil className="w-4 h-4 mr-1" />
@@ -497,14 +589,24 @@ export default function ProjectModuleDetailPage() {
 
       {showCreateTaskModal && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl bg-card border border-border rounded-lg">
-            <div className="flex items-center justify-between p-6 border-b border-border">
+          <div className="flex max-h-[min(90vh,calc(100vh-2rem))] w-full max-w-2xl min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-lg">
+            <div className="flex shrink-0 items-center justify-between border-b border-border bg-card p-6">
               <h3 className="text-lg font-semibold">Create Task</h3>
-              <button onClick={() => setShowCreateTaskModal(false)} className="text-muted-foreground hover:text-foreground">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreateTaskModal(false)
+                  setTaskAttachments([])
+                  setTaskLinks([])
+                  setNewLink('')
+                }}
+                className="text-muted-foreground hover:text-foreground"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <form onSubmit={handleCreateTask} className="p-6 space-y-4">
+            <form onSubmit={handleCreateTask} className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-6 py-6">
               <div className="grid grid-cols-2 gap-4">
                 <div className="col-span-2">
                   <label className="block text-sm mb-2">Task Name *</label>
@@ -603,12 +705,94 @@ export default function ProjectModuleDetailPage() {
                     className="w-full px-4 py-2 border border-input rounded-lg bg-background"
                   />
                 </div>
+                <div className="col-span-2">
+                  <label className="block text-sm mb-2">Document or reference URL</label>
+                  <input
+                    type="url"
+                    value={newTask.document_url}
+                    onChange={(e) => setNewTask({ ...newTask, document_url: e.target.value })}
+                    placeholder="https://…"
+                    className="w-full px-4 py-2 border border-input rounded-lg bg-background"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Optional. You can also add images or PDFs and links below; the first successful upload or link is stored on the task when the field is empty.
+                  </p>
+                </div>
+                <div className="col-span-2 space-y-2">
+                  <label className="block text-sm mb-1">Attachments (images or PDF)</label>
+                  <input
+                    type="file"
+                    accept={TASK_ATTACHMENT_ACCEPT}
+                    multiple
+                    onChange={handleFileSelect}
+                    className="block w-full text-sm text-muted-foreground file:mr-2 file:rounded file:border file:bg-background file:px-2 file:py-1"
+                  />
+                  {taskAttachments.length > 0 && (
+                    <ul className="text-xs space-y-1">
+                      {taskAttachments.map((f, i) => (
+                        <li key={`${f.name}-${i}`} className="flex items-center justify-between gap-2">
+                          <span className="truncate">{f.name}</span>
+                          <button
+                            type="button"
+                            className="text-destructive shrink-0"
+                            onClick={() =>
+                              setTaskAttachments((prev) => prev.filter((_, idx) => idx !== i))
+                            }
+                          >
+                            Remove
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div className="col-span-2 space-y-2">
+                  <label className="block text-sm mb-1">Extra links (saved as attachments)</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="url"
+                      value={newLink}
+                      onChange={(e) => setNewLink(e.target.value)}
+                      placeholder="https://…"
+                      className="flex-1 px-4 py-2 border border-input rounded-lg bg-background"
+                    />
+                    <Button type="button" size="sm" variant="outline" onClick={handleAddLink}>
+                      Add
+                    </Button>
+                  </div>
+                  {taskLinks.length > 0 && (
+                    <ul className="text-xs space-y-1 break-all">
+                      {taskLinks.map((u, i) => (
+                        <li key={u + i} className="flex items-start justify-between gap-2">
+                          <span>{u}</span>
+                          <button
+                            type="button"
+                            className="text-destructive shrink-0"
+                            onClick={() => setTaskLinks((prev) => prev.filter((_, idx) => idx !== i))}
+                          >
+                            Remove
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </div>
-              <div className="pt-4 border-t border-border flex justify-end gap-2">
-                <Button type="button" variant="outline" onClick={() => setShowCreateTaskModal(false)}>
+              </div>
+              <div className="flex shrink-0 justify-end gap-2 border-t border-border bg-card px-6 py-4">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setShowCreateTaskModal(false)
+                    setTaskAttachments([])
+                    setTaskLinks([])
+                    setNewLink('')
+                  }}
+                >
                   Cancel
                 </Button>
-                <Button type="submit" disabled={creatingTask || !newTask.title.trim() || !newTask.sprint_id}>
+                <Button type="submit" disabled={creatingTask || !newTask.title.trim()}>
                   {creatingTask ? 'Creating...' : 'Create Task'}
                 </Button>
               </div>
@@ -618,14 +802,24 @@ export default function ProjectModuleDetailPage() {
       )}
       {showEditTaskModal && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl bg-card border border-border rounded-lg">
-            <div className="flex items-center justify-between p-6 border-b border-border">
+          <div className="flex max-h-[min(90vh,calc(100vh-2rem))] w-full max-w-2xl min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-lg">
+            <div className="flex shrink-0 items-center justify-between border-b border-border bg-card p-6">
               <h3 className="text-lg font-semibold">Edit Task</h3>
-              <button onClick={() => setShowEditTaskModal(false)} className="text-muted-foreground hover:text-foreground">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowEditTaskModal(false)
+                  setEditTaskAttachments([])
+                  setEditTaskLinks([])
+                  setEditNewLink('')
+                }}
+                className="text-muted-foreground hover:text-foreground"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <form onSubmit={handleUpdateTask} className="p-6 space-y-4">
+            <form onSubmit={handleUpdateTask} className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-6 py-6">
               <div className="grid grid-cols-2 gap-4">
                 <div className="col-span-2">
                   <label className="block text-sm mb-2">Task Name *</label>
@@ -713,10 +907,102 @@ export default function ProjectModuleDetailPage() {
                     onChange={(e) => setEditTask({ ...editTask, end_date: e.target.value })}
                     className="w-full px-4 py-2 border border-input rounded-lg bg-background"
                   />
+                  <p className="text-xs text-muted-foreground mt-1">Target date set by assigner / planner.</p>
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-sm mb-2">Document or reference URL</label>
+                  <input
+                    type="url"
+                    value={editTask.document_url}
+                    onChange={(e) => setEditTask({ ...editTask, document_url: e.target.value })}
+                    placeholder="https://…"
+                    className="w-full px-4 py-2 border border-input rounded-lg bg-background"
+                  />
+                </div>
+                <div className="col-span-2 space-y-2">
+                  <label className="block text-sm mb-1">Add attachments (images or PDF)</label>
+                  <input
+                    type="file"
+                    accept={TASK_ATTACHMENT_ACCEPT}
+                    multiple
+                    onChange={handleEditFileSelect}
+                    className="block w-full text-sm text-muted-foreground file:mr-2 file:rounded file:border file:bg-background file:px-2 file:py-1"
+                  />
+                  {editTaskAttachments.length > 0 && (
+                    <ul className="text-xs space-y-1">
+                      {editTaskAttachments.map((f, i) => (
+                        <li key={`${f.name}-e-${i}`} className="flex items-center justify-between gap-2">
+                          <span className="truncate">{f.name}</span>
+                          <button
+                            type="button"
+                            className="text-destructive shrink-0"
+                            onClick={() =>
+                              setEditTaskAttachments((prev) => prev.filter((_, idx) => idx !== i))
+                            }
+                          >
+                            Remove
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div className="col-span-2 space-y-2">
+                  <label className="block text-sm mb-1">Add links</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="url"
+                      value={editNewLink}
+                      onChange={(e) => setEditNewLink(e.target.value)}
+                      placeholder="https://…"
+                      className="flex-1 px-4 py-2 border border-input rounded-lg bg-background"
+                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const url = editNewLink.trim()
+                        if (!url) return
+                        setEditTaskLinks((prev) => [...prev, url])
+                        setEditNewLink('')
+                      }}
+                    >
+                      Add
+                    </Button>
+                  </div>
+                  {editTaskLinks.length > 0 && (
+                    <ul className="text-xs space-y-1 break-all">
+                      {editTaskLinks.map((u, i) => (
+                        <li key={u + i} className="flex items-start justify-between gap-2">
+                          <span>{u}</span>
+                          <button
+                            type="button"
+                            className="text-destructive shrink-0"
+                            onClick={() =>
+                              setEditTaskLinks((prev) => prev.filter((_, idx) => idx !== i))
+                            }
+                          >
+                            Remove
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               </div>
-              <div className="pt-4 border-t border-border flex justify-end gap-2">
-                <Button type="button" variant="outline" onClick={() => setShowEditTaskModal(false)}>
+              </div>
+              <div className="flex shrink-0 justify-end gap-2 border-t border-border bg-card px-6 py-4">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setShowEditTaskModal(false)
+                    setEditTaskAttachments([])
+                    setEditTaskLinks([])
+                    setEditNewLink('')
+                  }}
+                >
                   Cancel
                 </Button>
                 <Button type="submit" disabled={editingTask || !editTask.title.trim()}>

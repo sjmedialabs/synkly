@@ -35,7 +35,12 @@ type Task = {
 type SmartAssignModalProps = {
   task: Task
   onClose: () => void
-  onAssign: (employeeId: string, estimatedHours: number, sprintId: string) => Promise<void>
+  onAssign: (
+    employeeId: string,
+    estimatedHours: number,
+    sprintId: string,
+    targetEndDate: string | null,
+  ) => Promise<void>
 }
 
 export function SmartAssignModal({ task, onClose, onAssign }: SmartAssignModalProps) {
@@ -45,6 +50,7 @@ export function SmartAssignModal({ task, onClose, onAssign }: SmartAssignModalPr
   const [selectedEmployee, setSelectedEmployee] = useState<string | null>(null)
   const [selectedSprint, setSelectedSprint] = useState<string>(task.sprint_id || '')
   const [estimatedHours, setEstimatedHours] = useState(task.estimated_hours || 8)
+  const [targetEndDate, setTargetEndDate] = useState<string>('')
   const [assigning, setAssigning] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -126,7 +132,12 @@ export function SmartAssignModal({ task, onClose, onAssign }: SmartAssignModalPr
     setAssigning(true)
     setError(null)
     try {
-      await onAssign(selectedEmployee, estimatedHours, selectedSprint)
+      await onAssign(
+        selectedEmployee,
+        estimatedHours,
+        selectedSprint,
+        targetEndDate.trim() ? targetEndDate.trim().slice(0, 10) : null,
+      )
     } catch (err: any) {
       const errorMsg = err.message || 'Failed to assign task'
       setError(errorMsg)
@@ -228,6 +239,21 @@ export function SmartAssignModal({ task, onClose, onAssign }: SmartAssignModalPr
             />
             <p className="text-xs text-muted-foreground mt-1">
               This will be deducted from the assignee&apos;s available capacity
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-2">
+              Target end date (optional)
+            </label>
+            <input
+              type="date"
+              value={targetEndDate}
+              onChange={(e) => setTargetEndDate(e.target.value)}
+              className="w-full max-w-xs px-3 py-2 border border-input rounded-lg bg-background text-foreground"
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              Deadline you set for the assignee; actual completion is recorded when the task is marked done.
             </p>
           </div>
         </div>

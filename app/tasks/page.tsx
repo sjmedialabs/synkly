@@ -37,6 +37,9 @@ type Task = {
   sprint_id: string | null
   carried_from_sprint_id: string | null
   due_date: string | null
+  end_date?: string | null
+  completed_at?: string | null
+  document_url?: string | null
   created_at: string
   assignee?: {
     full_name: string | null
@@ -94,6 +97,7 @@ function TaskCardInner({
   canAssignTask,
   onStatusChange,
   onAssign,
+  onOpenDetails,
   dragHandle,
   isOverlay,
 }: {
@@ -101,13 +105,23 @@ function TaskCardInner({
   canAssignTask: boolean
   onStatusChange: (taskId: string, status: string) => void
   onAssign: (task: Task) => void
+  onOpenDetails: (task: Task) => void
   dragHandle?: ReactNode
   isOverlay?: boolean
 }) {
   return (
     <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpenDetails(task)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onOpenDetails(task)
+        }
+      }}
       className={cn(
-        'bg-card border border-border rounded-md transition group',
+        'bg-card border border-border rounded-md transition group text-left w-full cursor-pointer',
         isOverlay ? 'shadow-lg ring-2 ring-primary/20 w-52' : 'hover:shadow-sm',
       )}
     >
@@ -171,6 +185,7 @@ function TaskCardInner({
               <select
                 value={task.status}
                 onChange={(e) => onStatusChange(task.id, e.target.value)}
+                onClick={(e) => e.stopPropagation()}
                 className="flex-1 min-w-0 text-[10px] px-1 py-0.5 border border-input rounded bg-background text-foreground"
                 onPointerDown={(e) => e.stopPropagation()}
               >
@@ -204,11 +219,13 @@ function DraggableTaskCard({
   canAssignTask,
   onStatusChange,
   onAssign,
+  onOpenDetails,
 }: {
   task: Task
   canAssignTask: boolean
   onStatusChange: (taskId: string, status: string) => void
   onAssign: (task: Task) => void
+  onOpenDetails: (task: Task) => void
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: task.id,
@@ -235,6 +252,7 @@ function DraggableTaskCard({
         canAssignTask={canAssignTask}
         onStatusChange={onStatusChange}
         onAssign={onAssign}
+        onOpenDetails={onOpenDetails}
         dragHandle={handle}
       />
     </div>
@@ -297,6 +315,7 @@ export default function TasksPage() {
   const [filterProject, setFilterProject] = useState<string | null>(null)
   const [showAssignModal, setShowAssignModal] = useState(false)
   const [selectedTaskForAssign, setSelectedTaskForAssign] = useState<Task | null>(null)
+  const [selectedTaskForDetails, setSelectedTaskForDetails] = useState<Task | null>(null)
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
   const [activeDragTask, setActiveDragTask] = useState<Task | null>(null)
 
@@ -518,6 +537,7 @@ export default function TasksPage() {
                       task={task}
                       canAssignTask={canAssignTask}
                       onStatusChange={handleStatusChange}
+                      onOpenDetails={(t) => setSelectedTaskForDetails(t)}
                       onAssign={(t) => {
                         setSelectedTaskForAssign(t)
                         setShowAssignModal(true)
@@ -537,11 +557,86 @@ export default function TasksPage() {
               canAssignTask={false}
               onStatusChange={() => {}}
               onAssign={() => {}}
+              onOpenDetails={() => {}}
               isOverlay
             />
           ) : null}
         </DragOverlay>
       </DndContext>
+
+      {selectedTaskForDetails ? (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl rounded-lg border border-border bg-card shadow-lg">
+            <div className="flex items-center justify-between p-4 border-b border-border">
+              <h3 className="text-lg font-semibold text-foreground">Task Details</h3>
+              <button
+                type="button"
+                className="px-2 py-1 text-xs rounded border border-input hover:bg-muted"
+                onClick={() => setSelectedTaskForDetails(null)}
+              >
+                Close
+              </button>
+            </div>
+            <div className="p-4 space-y-3 text-sm">
+              <div>
+                <p className="text-muted-foreground text-xs">Title</p>
+                <p className="text-foreground font-medium">{selectedTaskForDetails.title}</p>
+              </div>
+              <div>
+                <p className="text-muted-foreground text-xs">Description</p>
+                <p className="text-foreground whitespace-pre-wrap">
+                  {selectedTaskForDetails.description || 'No description'}
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><span className="text-muted-foreground text-xs">Status</span><p className="capitalize">{selectedTaskForDetails.status.replace('_', ' ')}</p></div>
+                <div><span className="text-muted-foreground text-xs">Priority</span><p className="capitalize">{selectedTaskForDetails.priority}</p></div>
+                <div><span className="text-muted-foreground text-xs">Type</span><p className="capitalize">{selectedTaskForDetails.task_type}</p></div>
+                <div><span className="text-muted-foreground text-xs">Assignee</span><p>{selectedTaskForDetails.assignee?.full_name || selectedTaskForDetails.assignee?.email || 'Unassigned'}</p></div>
+                <div><span className="text-muted-foreground text-xs">Project</span><p>{selectedTaskForDetails.projects?.name || 'N/A'}</p></div>
+                <div><span className="text-muted-foreground text-xs">Module</span><p>{selectedTaskForDetails.modules?.name || 'N/A'}</p></div>
+                <div><span className="text-muted-foreground text-xs">Estimated Hours</span><p>{selectedTaskForDetails.estimated_hours ?? 'N/A'}</p></div>
+                <div><span className="text-muted-foreground text-xs">Due Date</span><p>{selectedTaskForDetails.due_date ? new Date(selectedTaskForDetails.due_date).toLocaleDateString() : 'N/A'}</p></div>
+                <div>
+                  <span className="text-muted-foreground text-xs">Target end (assigner)</span>
+                  <p>
+                    {selectedTaskForDetails.end_date
+                      ? new Date(selectedTaskForDetails.end_date).toLocaleDateString()
+                      : 'N/A'}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-muted-foreground text-xs">Completed at (actual)</span>
+                  <p>
+                    {selectedTaskForDetails.completed_at
+                      ? new Date(selectedTaskForDetails.completed_at).toLocaleString()
+                      : '—'}
+                  </p>
+                </div>
+                <div className="col-span-2">
+                  <span className="text-muted-foreground text-xs">Document / reference URL</span>
+                  <p>
+                    {selectedTaskForDetails.document_url ? (
+                      <a
+                        href={selectedTaskForDetails.document_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-primary underline break-all"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {selectedTaskForDetails.document_url}
+                      </a>
+                    ) : (
+                      'None'
+                    )}
+                  </p>
+                </div>
+                <div><span className="text-muted-foreground text-xs">Created</span><p>{new Date(selectedTaskForDetails.created_at).toLocaleString()}</p></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {showAssignModal && selectedTaskForAssign && (
         <SmartAssignModal
@@ -556,7 +651,7 @@ export default function TasksPage() {
             setShowAssignModal(false)
             setSelectedTaskForAssign(null)
           }}
-          onAssign={async (employeeId, estimatedHours, sprintId) => {
+          onAssign={async (employeeId, estimatedHours, sprintId, targetEndDate) => {
             try {
               const task_id = String(selectedTaskForAssign.id ?? '').trim()
               if (!task_id) {
@@ -571,6 +666,7 @@ export default function TasksPage() {
                   estimated_hours: estimatedHours,
                   sprint_id: sprintId,
                   month: new Date().toISOString().slice(0, 7),
+                  ...(targetEndDate ? { end_date: targetEndDate } : {}),
                 }),
               })
               const result = await response.json()
@@ -591,6 +687,7 @@ export default function TasksPage() {
                         assignee: assignee ? { full_name: assignee.full_name, email: assignee.email } : null,
                         estimated_hours: updatedTask?.estimated_hours ?? estimatedHours,
                         sprint_id: updatedTask?.sprint_id ?? null,
+                        end_date: updatedTask?.end_date ?? task.end_date ?? null,
                         carried_from_sprint_id:
                           updatedTask?.carried_from_sprint_id ?? task.carried_from_sprint_id,
                       }
