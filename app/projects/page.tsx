@@ -10,6 +10,7 @@ import { Plus, FolderKanban, Pencil, Eye, CheckSquare, Layers, ListTodo, Clock }
 import { projectEditHref, projectHref } from '@/lib/slug'
 import { QuickCreateTaskModal } from '@/components/projects/quick-create-task-modal'
 import { cn } from '@/lib/utils'
+import { canAssignTasks, canManageProjects } from '@/lib/rbac'
 
 export default function ProjectsPage() {
   const supabase = createClient()
@@ -27,6 +28,7 @@ export default function ProjectsPage() {
 
   // Master Admin, Client Admin, and Manager can create projects
   const canCreateProject = userRole && ['master_admin', 'client_admin', 'manager'].includes(userRole)
+  const canEditProject = canManageProjects(userRole as any)
 
   useEffect(() => {
     async function getUser() {
@@ -99,7 +101,7 @@ export default function ProjectsPage() {
       title="Projects"
       actions={
         <div className="flex flex-wrap items-center gap-2">
-          {projects.length > 0 && (
+          {projects.length > 0 && canAssignTasks(userRole as any) && (
             <>
               <Button
                 variant="outline"
@@ -234,12 +236,14 @@ export default function ProjectsPage() {
                             View
                           </Button>
                         </Link>
-                        <Link href={projectEditHref(project, projectSummaries)} className="flex-1 min-w-[7rem]">
-                          <Button variant="outline" size="sm" className="w-full gap-2" title="Edit project">
-                            <Pencil className="h-4 w-4" />
-                            Edit
-                          </Button>
-                        </Link>
+                        {canEditProject ? (
+                          <Link href={projectEditHref(project, projectSummaries)} className="flex-1 min-w-[7rem]">
+                            <Button variant="outline" size="sm" className="w-full gap-2" title="Edit project">
+                              <Pencil className="h-4 w-4" />
+                              Edit
+                            </Button>
+                          </Link>
+                        ) : null}
                       </div>
                     </div>
                   </article>

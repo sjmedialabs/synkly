@@ -181,17 +181,59 @@ export async function getAuthContext(): Promise<AuthContextResult> {
   const metaClientId = typeof meta?.client_id === 'string' ? meta.client_id : null
   const clientId = userData?.client_id || metaClientId || null
 
-  // Fetch granular permissions from role
+  function permissionsFromRow(row: { permissions?: unknown } | null): Record<string, Record<string, boolean>> | null {
+    if (row?.permissions && typeof row.permissions === 'object') {
+      return row.permissions as Record<string, Record<string, boolean>>
+    }
+    return null
+  }
+
+  // Granular permissions from `roles.permissions` (sidebar + API gate)
   let rolePermissions: Record<string, Record<string, boolean>> | null = null
-  if (role && userData?.role_id) {
+  if (userData?.role_id) {
     const { data: permRole } = await adminClient
       .from('roles')
       .select('permissions')
       .eq('id', userData.role_id)
       .maybeSingle()
-    if (permRole?.permissions && typeof permRole.permissions === 'object') {
-      rolePermissions = permRole.permissions as Record<string, Record<string, boolean>>
+    rolePermissions = permissionsFromRow(permRole)
+  }
+
+  if (!rolePermissions && userData?.roles) {
+    const joinedName = Array.isArray(userData.roles)
+      ? (userData.roles[0] as { name?: string } | undefined)?.name
+      : (userData.roles as { name?: string }).name
+    if (typeof joinedName === 'string' && joinedName) {
+      const { data: permRole } = await adminClient
+        .from('roles')
+        .select('permissions')
+        .eq('name', joinedName)
+        .maybeSingle()
+      rolePermissions = permissionsFromRow(permRole)
     }
+  }
+
+  if (!rolePermissions && typeof userData?.role === 'string' && userData.role.trim()) {
+    const r = userData.role.trim()
+    const looksUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(r)
+    if (looksUuid) {
+      const { data: permRole } = await adminClient.from('roles').select('permissions').eq('id', r).maybeSingle()
+      rolePermissions = permissionsFromRow(permRole)
+    } else {
+      const { data: permRole } = await adminClient.from('roles').select('permissions').eq('name', r).maybeSingle()
+      rolePermissions = permissionsFromRow(permRole)
+    }
+  }
+
+  // Members often have no role_id / people.role; auth metadata still resolves RoleKey (e.g. member).
+  // Load permissions from the built-in role row by canonical name so sidebar matches Roles & Permissions UI.
+  if (!rolePermissions && role) {
+    const { data: permRole } = await adminClient
+      .from('roles')
+      .select('permissions')
+      .eq('name', role)
+      .maybeSingle()
+    rolePermissions = permissionsFromRow(permRole)
   }
 
   const result = {

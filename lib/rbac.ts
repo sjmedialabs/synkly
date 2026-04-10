@@ -257,17 +257,26 @@ export interface UserWithRole {
 /** Module × action permission map stored in roles.permissions JSONB */
 export type PermissionMap = Record<string, Record<string, boolean>>
 
-/** All modules that can appear in the granular permissions JSON */
+/**
+ * Modules shown in Roles & Permissions (sidebar / app areas).
+ * Order matches the matrix UI: primary nav items first, then admin-ish modules.
+ */
 export const PERMISSION_MODULES = [
+  'dashboard',
+  'team_management',
   'projects',
   'tasks',
-  'modules',
-  'team',
+  'bulk_upload',
+  'milestones',
+  'sprints',
+  'capacity',
+  'utilization',
+  'risks',
   'reports',
   'settings',
   'master_data',
-  'sprints',
-  'milestones',
+  'modules',
+  'team',
 ] as const
 
 export type PermissionModule = (typeof PERMISSION_MODULES)[number]
@@ -285,46 +294,81 @@ export const PERMISSION_ACTIONS = [
 
 export type PermissionAction = (typeof PERMISSION_ACTIONS)[number]
 
-/** Default granular permissions per role (mirrors the DB seed) */
+/** All actions false — use `{ ...ALL_FALSE, view: true }` etc. */
+export const ALL_FALSE: Record<PermissionAction, boolean> = {
+  view: false,
+  create: false,
+  edit: false,
+  delete: false,
+  assign: false,
+  export: false,
+  view_all: false,
+}
+
+export const ALL_TRUE: Record<PermissionAction, boolean> = {
+  view: true,
+  create: true,
+  edit: true,
+  delete: true,
+  assign: true,
+  export: true,
+  view_all: true,
+}
+
+/** Default granular permissions per role (mirrors intended nav + API access) */
 export const DEFAULT_GRANULAR_PERMISSIONS: Record<RoleKey, PermissionMap> = {
-  master_admin: Object.fromEntries(
-    PERMISSION_MODULES.map((m) => [m, Object.fromEntries(PERMISSION_ACTIONS.map((a) => [a, true]))]),
-  ),
-  client_admin: Object.fromEntries(
-    PERMISSION_MODULES.map((m) => [m, Object.fromEntries(PERMISSION_ACTIONS.map((a) => [a, true]))]),
-  ),
+  master_admin: Object.fromEntries(PERMISSION_MODULES.map((m) => [m, { ...ALL_TRUE }])) as PermissionMap,
+  client_admin: Object.fromEntries(PERMISSION_MODULES.map((m) => [m, { ...ALL_TRUE }])) as PermissionMap,
   manager: {
-    projects:   { view: true, create: true, edit: true, delete: true, assign: false, export: false, view_all: false },
-    tasks:      { view: true, create: true, edit: true, delete: true, assign: true, export: false, view_all: false },
-    modules:    { view: true, create: true, edit: true, delete: false, assign: false, export: false, view_all: false },
-    team:       { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    reports:    { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    settings:   { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    master_data:{ view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    sprints:    { view: true, create: true, edit: true, delete: false, assign: false, export: false, view_all: false },
+    dashboard: { ...ALL_FALSE, view: true },
+    team_management: { ...ALL_FALSE, view: true },
+    projects: { view: true, create: true, edit: true, delete: true, assign: false, export: false, view_all: false },
+    tasks: { view: true, create: true, edit: true, delete: true, assign: true, export: false, view_all: false },
+    bulk_upload: { ...ALL_FALSE, view: true },
     milestones: { view: true, create: true, edit: true, delete: false, assign: false, export: false, view_all: false },
+    sprints: { view: true, create: true, edit: true, delete: false, assign: false, export: false, view_all: false },
+    capacity: { ...ALL_FALSE, view: true },
+    utilization: { ...ALL_FALSE, view: true },
+    risks: { ...ALL_FALSE, view: true },
+    reports: { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    settings: { ...ALL_FALSE },
+    master_data: { ...ALL_FALSE },
+    modules: { view: true, create: true, edit: true, delete: false, assign: false, export: false, view_all: false },
+    team: { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
   },
   team_lead: {
-    projects:   { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    tasks:      { view: true, create: true, edit: true, delete: false, assign: true, export: false, view_all: false },
-    modules:    { view: true, create: true, edit: true, delete: false, assign: false, export: false, view_all: false },
-    team:       { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    reports:    { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    settings:   { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    master_data:{ view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    sprints:    { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    dashboard: { ...ALL_FALSE, view: true },
+    team_management: { ...ALL_FALSE },
+    projects: { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    tasks: { view: true, create: true, edit: true, delete: false, assign: true, export: false, view_all: false },
+    bulk_upload: { ...ALL_FALSE },
     milestones: { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    sprints: { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    capacity: { ...ALL_FALSE },
+    utilization: { ...ALL_FALSE },
+    risks: { ...ALL_FALSE },
+    reports: { ...ALL_FALSE },
+    settings: { ...ALL_FALSE },
+    master_data: { ...ALL_FALSE },
+    modules: { view: true, create: true, edit: true, delete: false, assign: false, export: false, view_all: false },
+    team: { ...ALL_FALSE, view: true },
   },
   member: {
-    projects:   { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    tasks:      { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    modules:    { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    team:       { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    reports:    { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    settings:   { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    master_data:{ view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
-    sprints:    { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    dashboard: { ...ALL_FALSE, view: true },
+    team_management: { ...ALL_FALSE },
+    projects: { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    tasks: { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    bulk_upload: { ...ALL_FALSE },
     milestones: { view: false, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    sprints: { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    capacity: { ...ALL_FALSE },
+    utilization: { ...ALL_FALSE },
+    risks: { ...ALL_FALSE },
+    reports: { ...ALL_FALSE },
+    settings: { ...ALL_FALSE },
+    master_data: { ...ALL_FALSE },
+    modules: { view: true, create: false, edit: false, delete: false, assign: false, export: false, view_all: false },
+    team: { ...ALL_FALSE },
   },
 }
 
@@ -333,6 +377,14 @@ export const DEFAULT_GRANULAR_PERMISSIONS: Record<RoleKey, PermissionMap> = {
  * Returns undefined if the permission map doesn't contain the module/action
  * (caller should fall back to legacy check).
  */
+/** True if the role has any module/action explicitly granted in the DB JSON (used for nav). */
+export function hasConfiguredGranularPermissions(perms: PermissionMap | null | undefined): boolean {
+  if (!perms || typeof perms !== 'object') return false
+  return Object.values(perms).some(
+    (mod) => mod && typeof mod === 'object' && !Array.isArray(mod) && Object.values(mod).some((v) => v === true),
+  )
+}
+
 export function hasGranularPermission(
   permissions: PermissionMap | null | undefined,
   module: string,
@@ -379,7 +431,14 @@ export function checkPermission(
     'tasks.delete': 'DELETE_TASK',
     'tasks.assign': 'ASSIGN_TASK',
     'team.view': 'VIEW_TEAM',
+    'team_management.view': 'VIEW_TEAM',
     'team.create': 'CREATE_USER',
+    'bulk_upload.view': 'CREATE_TASK',
+    'bulk_upload.create': 'CREATE_TASK',
+    'capacity.view': 'VIEW_REPORTS',
+    'utilization.view': 'VIEW_REPORTS',
+    'risks.view': 'VIEW_REPORTS',
+    'dashboard.view': 'VIEW_PROJECT',
     'team.edit': 'UPDATE_USER',
     'team.delete': 'DELETE_USER',
     'reports.view': 'VIEW_REPORTS',

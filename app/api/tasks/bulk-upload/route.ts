@@ -47,7 +47,9 @@ export async function POST(request: NextRequest) {
     if (
       !isFullAccessRole(ctx.role) &&
       !hasPermission(ctx.role, 'CREATE_TASK') &&
-      !hasModulePermission(ctx, 'tasks', 'create')
+      !hasModulePermission(ctx, 'tasks', 'create') &&
+      !hasModulePermission(ctx, 'bulk_upload', 'view') &&
+      !hasModulePermission(ctx, 'bulk_upload', 'create')
     ) {
       return NextResponse.json({ error: 'You do not have permission to create tasks' }, { status: 403 })
     }

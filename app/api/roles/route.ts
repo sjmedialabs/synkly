@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthContext } from '@/lib/rbac-server'
-import { longCacheHeaders, masterDataCache } from '@/lib/cache'
+import { apiCache, authCache, longCacheHeaders, masterDataCache } from '@/lib/cache'
 import { ROLE_KEYS } from '@/lib/rbac'
 
 function isMissingRolesTable(err: { code?: string; message?: string } | null) {
@@ -114,6 +114,8 @@ export async function POST(request: NextRequest) {
     }
 
     masterDataCache.delete('roles')
+    authCache.invalidatePrefix('auth:')
+    apiCache.invalidatePrefix('me:')
     return NextResponse.json({ role: data }, { status: 201 })
   } catch (e) {
     console.error('[roles API] POST:', e)
@@ -161,6 +163,8 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
     masterDataCache.delete('roles')
+    authCache.invalidatePrefix('auth:')
+    apiCache.invalidatePrefix('me:')
     return NextResponse.json({ role: data })
   } catch (e) {
     console.error('[roles API] PUT:', e)
@@ -202,6 +206,8 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
     masterDataCache.delete('roles')
+    authCache.invalidatePrefix('auth:')
+    apiCache.invalidatePrefix('me:')
     return NextResponse.json({ success: true })
   } catch (e) {
     console.error('[roles API] DELETE:', e)

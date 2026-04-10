@@ -89,6 +89,8 @@ export async function GET() {
       full_name: profileRes.data?.full_name || profileRes.data?.name || null,
       clientId: effectiveClientId,
       role: ctx.role,
+      /** Granular module permissions from `roles.permissions` (for sidebar + UI). */
+      permissions: ctx.permissions ?? null,
       status: profileStatus,
       isMasterAdmin: ctx.isMasterAdmin,
       isClientAdmin: ctx.isClientAdmin,

@@ -22,15 +22,21 @@ const formatName = (name: string) =>
   name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 
 const MODULE_LABELS: Record<string, string> = {
+  dashboard: 'Dashboard',
+  team_management: 'Team Management',
   projects: 'Projects',
   tasks: 'Tasks',
-  modules: 'Modules',
-  team: 'Team',
+  bulk_upload: 'Bulk Upload Tasks',
+  milestones: 'Milestones',
+  sprints: 'Sprints',
+  capacity: 'Capacity',
+  utilization: 'Utilization',
+  risks: 'Risks',
   reports: 'Reports',
   settings: 'Settings',
   master_data: 'Master Data',
-  sprints: 'Sprints',
-  milestones: 'Milestones',
+  modules: 'Modules',
+  team: 'My Team',
 }
 
 const ACTION_LABELS: Record<string, string> = {

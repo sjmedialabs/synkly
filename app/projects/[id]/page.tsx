@@ -10,7 +10,7 @@ import {
   projectUrlSegment,
   resolveProjectFromRef,
 } from '@/lib/slug'
-import { canCreateModules } from '@/lib/rbac'
+import { canAssignTasks, canCreateModules } from '@/lib/rbac'
 import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import {
@@ -83,9 +83,12 @@ export default function ProjectDetailPage() {
   const [newModuleName, setNewModuleName] = useState('')
   const [creatingModule, setCreatingModule] = useState(false)
   const [canAddModule, setCanAddModule] = useState(false)
+  const [viewerRole, setViewerRole] = useState<string | null>(null)
   const [showCreateTask, setShowCreateTask] = useState(false)
   const [createTaskModalKey, setCreateTaskModalKey] = useState(0)
   const prevShowCreateTask = useRef(false)
+  /** When set, task rollups and module cards are limited to this assignee (member view). */
+  const assigneeFilterRef = useRef<string | null>(null)
 
   const router = useRouter()
   const supabase = createClient()
@@ -94,16 +97,26 @@ export default function ProjectDetailPage() {
     async (projectId: string, moduleList: Module[]) => {
       const sel = 'module_id, estimation, estimated_hours'
       let rows: TaskRollupRow[] = []
-      const byProject = await supabase
-        .from('tasks')
-        .select(sel)
-        .eq('project_id', projectId)
-      if (!byProject.error && byProject.data) {
-        rows = byProject.data as TaskRollupRow[]
-      } else if (moduleList.length > 0) {
+      const uid = assigneeFilterRef.current
+      let byProject = supabase.from('tasks').select(sel).eq('project_id', projectId)
+      if (uid) byProject = byProject.eq('assignee_id', uid)
+      const byProjectRes = await byProject
+      if (!byProjectRes.error && byProjectRes.data) {
+        rows = byProjectRes.data as TaskRollupRow[]
+      } else if (moduleList.length > 0 && !uid) {
         const moduleIds = moduleList.map((m) => m.id).filter(Boolean)
         if (moduleIds.length > 0) {
           const byMod = await supabase.from('tasks').select(sel).in('module_id', moduleIds)
+          if (!byMod.error && byMod.data) rows = byMod.data as TaskRollupRow[]
+        }
+      } else if (moduleList.length > 0 && uid) {
+        const moduleIds = moduleList.map((m) => m.id).filter(Boolean)
+        if (moduleIds.length > 0) {
+          const byMod = await supabase
+            .from('tasks')
+            .select(sel)
+            .in('module_id', moduleIds)
+            .eq('assignee_id', uid)
           if (!byMod.error && byMod.data) rows = byMod.data as TaskRollupRow[]
         }
       }
@@ -124,10 +137,16 @@ export default function ProjectDetailPage() {
       }
 
       const meRes = await fetch('/api/me')
+      let meRole: string | null = null
       if (meRes.ok) {
         const me = await meRes.json()
+        meRole = me.role ?? null
+        setViewerRole(meRole)
         setCanAddModule(canCreateModules(me.role))
       }
+
+      const scopeMyWork = meRole === 'member'
+      assigneeFilterRef.current = scopeMyWork ? user.id : null
 
       const { data: summaryRows } = await supabase.from('projects').select('id, name')
       const summaries = summaryRows || []
@@ -152,6 +171,18 @@ export default function ProjectDetailPage() {
       setProject(projectData)
       setProjectSummaries(summaries)
 
+      if (scopeMyWork) {
+        const listRes = await fetch('/api/projects')
+        if (listRes.ok) {
+          const listJson = await listRes.json()
+          const allowed = new Set((listJson.projects || []).map((p: { id: string }) => p.id))
+          if (!allowed.has(resolvedProjectId)) {
+            router.push('/projects')
+            return
+          }
+        }
+      }
+
       const segment = projectUrlSegment(projectData, summaries)
       if (decodeURIComponent(projectRef).trim() !== segment) {
         router.replace(projectHref(projectData, summaries))
@@ -163,7 +194,7 @@ export default function ProjectDetailPage() {
         .eq('project_id', resolvedProjectId)
         .order('created_at', { ascending: false })
 
-      const finalModules = ((modulesRes.data || []) as any[]).map((m) => ({
+      let finalModules = ((modulesRes.data || []) as any[]).map((m) => ({
         id: m.id,
         name: m.name || 'Untitled Module',
         description: m.description ?? null,
@@ -172,25 +203,40 @@ export default function ProjectDetailPage() {
         is_active: m.is_active ?? true,
       })) as Module[]
 
-      setModules(finalModules)
-
       let rollup: TaskRollupRow[] = []
-      const rollupRes = await supabase
-        .from('tasks')
-        .select('module_id, estimation, estimated_hours')
-        .eq('project_id', resolvedProjectId)
+      if (scopeMyWork) {
+        const rollupRes = await supabase
+          .from('tasks')
+          .select('module_id, estimation, estimated_hours')
+          .eq('project_id', resolvedProjectId)
+          .eq('assignee_id', user.id)
+        if (!rollupRes.error && rollupRes.data) {
+          rollup = rollupRes.data as TaskRollupRow[]
+        }
+        const moduleIdsWithWork = new Set(
+          rollup.map((r) => r.module_id).filter(Boolean) as string[],
+        )
+        finalModules = finalModules.filter((m) => moduleIdsWithWork.has(m.id))
+        setModules(finalModules)
+      } else {
+        setModules(finalModules)
+        const rollupRes = await supabase
+          .from('tasks')
+          .select('module_id, estimation, estimated_hours')
+          .eq('project_id', resolvedProjectId)
 
-      if (!rollupRes.error && rollupRes.data) {
-        rollup = rollupRes.data as TaskRollupRow[]
-      } else if (finalModules.length > 0) {
-        const moduleIds = finalModules.map((m) => m.id).filter(Boolean)
-        if (moduleIds.length > 0) {
-          const byMod = await supabase
-            .from('tasks')
-            .select('module_id, estimation, estimated_hours')
-            .in('module_id', moduleIds)
-          if (!byMod.error && byMod.data) {
-            rollup = byMod.data as TaskRollupRow[]
+        if (!rollupRes.error && rollupRes.data) {
+          rollup = rollupRes.data as TaskRollupRow[]
+        } else if (finalModules.length > 0) {
+          const moduleIds = finalModules.map((m) => m.id).filter(Boolean)
+          if (moduleIds.length > 0) {
+            const byMod = await supabase
+              .from('tasks')
+              .select('module_id, estimation, estimated_hours')
+              .in('module_id', moduleIds)
+            if (!byMod.error && byMod.data) {
+              rollup = byMod.data as TaskRollupRow[]
+            }
           }
         }
       }
@@ -286,23 +332,27 @@ export default function ProjectDetailPage() {
       title={project.name}
       actions={
         <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="default"
-            size="sm"
-            onClick={() => {
-              setCreateTaskModalKey((k) => k + 1)
-              setShowCreateTask(true)
-            }}
-          >
-            <CheckSquare className="w-4 h-4 mr-2" />
-            Create task
-          </Button>
-          <Button variant="outline" size="sm" asChild>
-            <Link href="/tasks/bulk-upload">
-              <Upload className="w-4 h-4 mr-2" />
-              Bulk upload
-            </Link>
-          </Button>
+          {canAssignTasks(viewerRole as any) ? (
+            <>
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => {
+                  setCreateTaskModalKey((k) => k + 1)
+                  setShowCreateTask(true)
+                }}
+              >
+                <CheckSquare className="w-4 h-4 mr-2" />
+                Create task
+              </Button>
+              <Button variant="outline" size="sm" asChild>
+                <Link href="/tasks/bulk-upload">
+                  <Upload className="w-4 h-4 mr-2" />
+                  Bulk upload
+                </Link>
+              </Button>
+            </>
+          ) : null}
           <Link href="/projects">
             <Button variant="outline" size="sm">
               <ArrowLeft className="w-4 h-4 mr-2" />
@@ -312,7 +362,7 @@ export default function ProjectDetailPage() {
         </div>
       }
     >
-      {showCreateTask && (
+      {showCreateTask && canAssignTasks(viewerRole as any) && (
         <QuickCreateTaskModal
           key={createTaskModalKey}
           onClose={() => setShowCreateTask(false)}
@@ -358,11 +408,13 @@ export default function ProjectDetailPage() {
               Add module
             </Button>
           )}
-          <Link href={`/modules?project=${project.id}`}>
-            <Button size="sm" variant="outline">
-              View all modules
-            </Button>
-          </Link>
+          {viewerRole !== 'member' ? (
+            <Link href={`/modules?project=${project.id}`}>
+              <Button size="sm" variant="outline">
+                View all modules
+              </Button>
+            </Link>
+          ) : null}
           <Link href="/tasks">
             <Button size="sm" variant="outline">
               Global task board
@@ -372,9 +424,20 @@ export default function ProjectDetailPage() {
       </div>
 
       {modules.length === 0 ? (
-        <p className="py-12 text-center text-sm text-muted-foreground border border-dashed border-border rounded-2xl">
-          No modules yet. Add one to organize work.
-        </p>
+        <div className="space-y-3">
+          {viewerRole === 'member' && taskRollupRows.length > 0 ? (
+            <p className="py-12 text-center text-sm text-muted-foreground border border-dashed border-border rounded-2xl px-4">
+              You have {taskRollupRows.length} assigned task
+              {taskRollupRows.length === 1 ? '' : 's'} in this project that{' '}
+              {taskRollupRows.length === 1 ? 'is' : 'are'} not under a module. Use the task board to work on{' '}
+              {taskRollupRows.length === 1 ? 'it' : 'them'}.
+            </p>
+          ) : (
+            <p className="py-12 text-center text-sm text-muted-foreground border border-dashed border-border rounded-2xl">
+              No modules yet. Add one to organize work.
+            </p>
+          )}
+        </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {moduleAggregates.map(({ module, taskCount, estimatedTime }, i) => {

@@ -4,12 +4,17 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { type RoleKey, ROLE_LABELS } from '@/lib/rbac'
+import {
+  type RoleKey,
+  ROLE_LABELS,
+  type PermissionMap,
+  checkPermission,
+  hasConfiguredGranularPermissions,
+} from '@/lib/rbac'
 import {
   LayoutDashboard,
   FolderKanban,
   CheckSquare,
-  Users,
   Settings,
   LogOut,
   Milestone,
@@ -23,7 +28,6 @@ import {
   Database,
   ChevronRight,
   Shield,
-  Briefcase,
   Upload,
 } from 'lucide-react'
 
@@ -33,6 +37,7 @@ interface UserWithRole {
   full_name: string | null
   role_name: RoleKey | null
   client_id: string | null
+  permissions: PermissionMap | null
 }
 
 const roleColors: Record<RoleKey, string> = {
@@ -87,7 +92,7 @@ const menuConfig: Record<RoleKey, MenuItem[]> = {
     { label: 'Projects', href: '/projects', icon: FolderKanban },
     { label: 'Tasks', href: '/tasks', icon: CheckSquare },
     { label: 'Bulk Upload Tasks', href: '/tasks/bulk-upload', icon: Upload },
-    { label: 'Team', href: '/team', icon: UsersRound },
+    { label: 'Team Management', href: '/team', icon: UsersRound },
     { label: 'Capacity', href: '/capacity', icon: Clock },
     { label: 'Utilization', href: '/utilization', icon: PieChart },
     { label: 'Risks', href: '/risks', icon: ShieldAlert },
@@ -100,13 +105,100 @@ const menuConfig: Record<RoleKey, MenuItem[]> = {
     { label: 'My Team', href: '/my-team', icon: UsersRound },
     { label: 'Projects', href: '/projects', icon: FolderKanban },
     { label: 'Tasks', href: '/tasks', icon: CheckSquare },
-    { label: 'Capacity', href: '/capacity', icon: Clock },
     { label: 'Sprints', href: '/sprints', icon: Target },
   ],
   member: [
     { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { label: 'My Tasks', href: '/tasks', icon: CheckSquare },
   ],
+}
+
+/** Superset of client nav links (order matches Roles & Permissions matrix). */
+const NAV_CATALOG: MenuItem[] = [
+  { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+  { label: 'Team Management', href: '/team', icon: UsersRound },
+  { label: 'My Team', href: '/my-team', icon: UsersRound },
+  { label: 'Projects', href: '/projects', icon: FolderKanban },
+  { label: 'Tasks', href: '/tasks', icon: CheckSquare },
+  { label: 'Bulk Upload Tasks', href: '/tasks/bulk-upload', icon: Upload },
+  { label: 'Milestones', href: '/milestones', icon: Milestone },
+  { label: 'Sprints', href: '/sprints', icon: Target },
+  { label: 'Capacity', href: '/capacity', icon: Clock },
+  { label: 'Utilization', href: '/utilization', icon: PieChart },
+  { label: 'Risks', href: '/risks', icon: ShieldAlert },
+  { label: 'Reports', href: '/reports', icon: BarChart3 },
+  {
+    label: 'Settings',
+    href: '/settings',
+    icon: Settings,
+    children: [
+      { label: 'Master Data', href: '/settings/master-data', icon: Database },
+      { label: 'Roles & Permissions', href: '/settings/master-data', icon: Shield },
+      { label: 'Org Structure', href: '/settings/master-data', icon: Building2 },
+    ],
+  },
+]
+
+function filterMenuByGranularPermissions(
+  items: MenuItem[],
+  role: RoleKey | null,
+  permissions: PermissionMap | null,
+): MenuItem[] {
+  const allows = (module: string, action: 'view' | 'create' = 'view') =>
+    checkPermission(role, permissions, module, action)
+
+  /** Projects list: View or View All on projects/modules (Roles UI can set view_all only). */
+  const canSeeProjectsNav = () =>
+    allows('projects') ||
+    allows('modules') ||
+    checkPermission(role, permissions, 'projects', 'view_all') ||
+    checkPermission(role, permissions, 'modules', 'view_all')
+
+  const canSeeDashboard = () =>
+    allows('dashboard') || checkPermission(role, permissions, 'dashboard', 'view_all')
+
+  const canBulkUploadNav = () =>
+    allows('bulk_upload') ||
+    checkPermission(role, permissions, 'bulk_upload', 'create') ||
+    allows('tasks', 'create')
+
+  const itemAllowed = (item: MenuItem): boolean => {
+    const { href } = item
+    if (href === '/dashboard') return canSeeDashboard()
+    if (href === '/my-team') return allows('team') && role === 'team_lead'
+    if (href === '/team') return allows('team_management') && role !== 'team_lead'
+    if (href === '/projects') return canSeeProjectsNav()
+    if (href === '/tasks') return allows('tasks')
+    if (href === '/tasks/bulk-upload') return canBulkUploadNav()
+    if (href === '/milestones') return allows('milestones')
+    if (href === '/sprints') return allows('sprints')
+    if (href === '/capacity') return allows('capacity')
+    if (href === '/utilization') return allows('utilization')
+    if (href === '/risks') return allows('risks')
+    if (href === '/reports') return allows('reports')
+    if (href === '/settings') return false
+    return false
+  }
+
+  const childAllowed = (href: string): boolean => {
+    if (href === '/settings/master-data') return allows('master_data') || allows('settings')
+    return allows('settings')
+  }
+
+  return items
+    .map((item) => {
+      if (item.children?.length) {
+        const children = item.children.filter((ch) => childAllowed(ch.href))
+        if (!children.length) return null
+        return { ...item, children }
+      }
+      if (!itemAllowed(item)) return null
+      if (item.href === '/tasks' && role === 'member') {
+        return { ...item, label: 'My Tasks' }
+      }
+      return item
+    })
+    .filter(Boolean) as MenuItem[]
 }
 
 export function Sidebar() {
@@ -143,6 +235,7 @@ export function Sidebar() {
         full_name: me.full_name,
         role_name: me.role,
         client_id: me.clientId,
+        permissions: (me.permissions as PermissionMap | null) ?? null,
       })
       setLoading(false)
     }
@@ -171,7 +264,15 @@ export function Sidebar() {
   }
 
   const roleName = user?.role_name
-  const menuItems = roleName ? (menuConfig[roleName] || menuConfig.member) : menuConfig.member
+  const granular = user?.permissions ?? null
+  const menuItems =
+    roleName === 'master_admin'
+      ? menuConfig.master_admin
+      : granular && hasConfiguredGranularPermissions(granular)
+        ? filterMenuByGranularPermissions(NAV_CATALOG, roleName, granular)
+        : roleName
+          ? menuConfig[roleName] || menuConfig.member
+          : menuConfig.member
 
   const toggleExpanded = (href: string) => {
     setExpandedItems(prev =>

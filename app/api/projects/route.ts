@@ -8,6 +8,7 @@ import {
   upsertClientRowForFk,
 } from '@/lib/rbac-server'
 import { getAccessibleProjectSummaries } from '@/lib/projects-access'
+import { fetchProjectIdsFromAssignedTasks, isMissingProjectUsersTable } from '@/lib/project-membership'
 import { NextRequest } from 'next/server'
 
 function isMissingProjectsTable(err: { code?: string; message?: string } | null) {
@@ -125,8 +126,8 @@ export async function GET() {
         }
       }
     } else if (role === 'team_lead') {
-      // Team lead sees projects they lead or are assigned to
-      const [leadProjectsRes, projectUsersRes] = await Promise.all([
+      // Team lead: projects they lead, project_users roster, and projects where they have assigned tasks
+      const [leadProjectsRes, projectUsersRes, taskProjectIds] = await Promise.all([
         adminClient
           .from('projects')
           .select('id, name, description, status, priority, phase, start_date, end_date, budget, created_at, client_id')
@@ -135,6 +136,7 @@ export async function GET() {
           .from('project_users')
           .select('project_id')
           .eq('user_id', ctx.userId),
+        fetchProjectIdsFromAssignedTasks(adminClient, ctx.userId),
       ])
 
       if (leadProjectsRes.error) {
@@ -148,13 +150,20 @@ export async function GET() {
         }
         return NextResponse.json({ error: leadProjectsRes.error.message }, { status: 500 })
       }
-      
+
+      if (projectUsersRes.error && !isMissingProjectUsersTable(projectUsersRes.error)) {
+        return NextResponse.json({ error: projectUsersRes.error.message }, { status: 500 })
+      }
+
       // Filter to own client
       const direct = (leadProjectsRes.data || []).filter(
         (p: any) => !clientId || p?.client_id === clientId,
       )
-      
-      const projectIds = Array.from(new Set((projectUsersRes.data || []).map((r: any) => r.project_id).filter(Boolean)))
+
+      const fromPu = projectUsersRes.error
+        ? []
+        : (projectUsersRes.data || []).map((r: any) => r.project_id).filter(Boolean)
+      const projectIds = Array.from(new Set([...fromPu, ...taskProjectIds]))
 
       let extra: any[] = []
       if (projectIds.length > 0) {
@@ -166,71 +175,112 @@ export async function GET() {
           extra = (extraRes.data || []).filter((p: any) => !clientId || p?.client_id === clientId)
         }
       }
-      
+
       const byId = new Map<string, any>()
       ;[...direct, ...extra].forEach((p) => byId.set(p.id, p))
       projects = Array.from(byId.values()).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
     } else if (role === 'member') {
-      // Members see only projects they are assigned to
-      const projectUsersRes = await adminClient
-        .from('project_users')
-        .select('project_id')
-        .eq('user_id', ctx.userId)
-      
-      if (projectUsersRes.error) {
+      // Members: project_users (if present) ∪ projects where they have assigned tasks
+      const [projectUsersRes, taskProjectIds] = await Promise.all([
+        adminClient.from('project_users').select('project_id').eq('user_id', ctx.userId),
+        fetchProjectIdsFromAssignedTasks(adminClient, ctx.userId),
+      ])
+
+      if (projectUsersRes.error && !isMissingProjectUsersTable(projectUsersRes.error)) {
         return NextResponse.json({ error: projectUsersRes.error.message }, { status: 500 })
       }
-      
-      const projectIds = (projectUsersRes.data || []).map((r: any) => r.project_id).filter(Boolean)
-      
+
+      const fromPu = projectUsersRes.error
+        ? []
+        : (projectUsersRes.data || []).map((r: any) => r.project_id).filter(Boolean)
+      const projectIds = Array.from(new Set([...fromPu, ...taskProjectIds]))
+
       if (projectIds.length > 0) {
         const projectsRes = await adminClient
           .from('projects')
           .select('id, name, description, status, priority, phase, start_date, end_date, budget, created_at, client_id')
           .in('id', projectIds)
-        
-        if (!projectsRes.error) {
-          projects = (projectsRes.data || []).filter((p: any) => !clientId || p?.client_id === clientId)
+
+        if (projectsRes.error) {
+          if (isMissingProjectsTable(projectsRes.error)) {
+            return NextResponse.json({
+              role,
+              projects: [],
+              warning:
+                'public.projects is missing. Runs scripts/018_ensure_projects_table.sql if this is a fresh DB.',
+            })
+          }
+          return NextResponse.json({ error: projectsRes.error.message }, { status: 500 })
         }
+        projects = (projectsRes.data || []).filter((p: any) => !clientId || p?.client_id === clientId)
       }
     } else {
       return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
     }
 
-    // Get task statistics for each project
+    // Get task statistics for each project (members: only tasks assigned to them)
     const ids = projects.map((p) => p.id)
     let taskStats: Record<string, { total: number; completed: number; estimation: number }> = {}
     let moduleCounts: Record<string, number> = {}
-    
-    if (ids.length > 0) {
-      const modulesRes = await adminClient
-        .from('modules')
-        .select('id, project_id')
-        .in('project_id', ids)
-      if (!modulesRes.error && modulesRes.data) {
-        moduleCounts = modulesRes.data.reduce((acc: Record<string, number>, row: any) => {
-          if (!row?.project_id) return acc
-          acc[row.project_id] = (acc[row.project_id] || 0) + 1
-          return acc
-        }, {})
-      }
+    const memberScoped = role === 'member'
 
-      const tasksRes = await adminClient
-        .from('tasks')
-        .select('project_id, status, estimated_hours')
-        .in('project_id', ids)
-      
-      if (!tasksRes.error && tasksRes.data) {
-        taskStats = tasksRes.data.reduce((acc: Record<string, any>, row: any) => {
-          if (!row.project_id) return acc
-          if (!acc[row.project_id]) {
-            acc[row.project_id] = { total: 0, completed: 0, estimation: 0 }
+    if (ids.length > 0) {
+      if (memberScoped) {
+        const { data: memberTasks, error: memberTasksErr } = await adminClient
+          .from('tasks')
+          .select('project_id, status, estimated_hours, module_id')
+          .in('project_id', ids)
+          .eq('assignee_id', ctx.userId)
+        if (!memberTasksErr && memberTasks) {
+          const perProjectModules: Record<string, Set<string>> = {}
+          taskStats = memberTasks.reduce((acc: Record<string, any>, row: any) => {
+            if (!row.project_id) return acc
+            if (!acc[row.project_id]) {
+              acc[row.project_id] = { total: 0, completed: 0, estimation: 0 }
+            }
+            acc[row.project_id].total++
+            if (row.status === 'done') acc[row.project_id].completed++
+            acc[row.project_id].estimation += Number(row.estimated_hours || 0)
+            if (row.module_id) {
+              if (!perProjectModules[row.project_id]) perProjectModules[row.project_id] = new Set()
+              perProjectModules[row.project_id].add(row.module_id)
+            }
+            return acc
+          }, {})
+          for (const [pid, set] of Object.entries(perProjectModules)) {
+            moduleCounts[pid] = set.size
           }
-          acc[row.project_id].total++
-          if (row.status === 'done') acc[row.project_id].completed++
-          acc[row.project_id].estimation += Number(row.estimated_hours || 0)
-          return acc
-        }, {})
+        }
+      } else {
+        const modulesRes = await adminClient
+          .from('modules')
+          .select('id, project_id')
+          .in('project_id', ids)
+        if (!modulesRes.error && modulesRes.data) {
+          moduleCounts = modulesRes.data.reduce((acc: Record<string, number>, row: any) => {
+            if (!row?.project_id) return acc
+            acc[row.project_id] = (acc[row.project_id] || 0) + 1
+            return acc
+          }, {})
+        }
+
+        const tasksRes = await adminClient
+          .from('tasks')
+          .select('project_id, status, estimated_hours')
+          .in('project_id', ids)
+
+        if (!tasksRes.error && tasksRes.data) {
+          taskStats = tasksRes.data.reduce((acc: Record<string, any>, row: any) => {
+            if (!row.project_id) return acc
+            if (!acc[row.project_id]) {
+              acc[row.project_id] = { total: 0, completed: 0, estimation: 0 }
+            }
+            acc[row.project_id].total++
+            if (row.status === 'done') acc[row.project_id].completed++
+            acc[row.project_id].estimation += Number(row.estimated_hours || 0)
+            return acc
+          }, {})
+        }
       }
     }
 
@@ -379,12 +429,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 
-    // Add project lead to project_users if specified
+    // Add project lead to project_users if specified (table may not exist in all environments)
     if (body.project_lead_id && data) {
-      await adminClient.from('project_users').upsert(
+      const pu = await adminClient.from('project_users').upsert(
         { project_id: data.id, user_id: body.project_lead_id, role: 'lead' },
         { onConflict: 'project_id,user_id' },
       )
+      if (pu.error && !isMissingProjectUsersTable(pu.error)) {
+        console.warn('project_users upsert after create:', pu.error.message)
+      }
     }
 
     apiCache.invalidatePrefix('projects:')
