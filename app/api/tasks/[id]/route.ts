@@ -1,62 +1,57 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient as createServerClient } from '@/lib/supabase/server'
-import { createClient } from '@supabase/supabase-js'
+import { getAuthContext, hasModulePermission, type AuthContextResult } from '@/lib/rbac-server'
 import { resolveAssignmentPersonRole } from '@/lib/people-for-assignment'
-import { hasPermission, isAssignableTaskRole, isFullAccessRole, resolveRole } from '@/lib/rbac'
+import { hasPermission, isAssignableTaskRole, isFullAccessRole } from '@/lib/rbac'
+import { normalizeTaskWorkflowStatus } from '@/lib/task-workflow-status'
 
-function getAdminClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const serviceRole = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!supabaseUrl || !serviceRole) throw new Error('Supabase admin credentials are missing')
-  return createClient(supabaseUrl, serviceRole, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  })
-}
+function assertCanEditTask(
+  auth: AuthContextResult,
+  userId: string,
+  taskRow: { assignee_id?: string | null },
+) {
+  const role = auth.role
+  const rawAid = taskRow.assignee_id
+  const assigneeId = rawAid != null ? String(rawAid).toLowerCase() : null
+  const uid = String(userId).toLowerCase()
+  const isAssignee = assigneeId != null && assigneeId === uid
 
-async function getAccessContext() {
-  const serverClient = await createServerClient()
-  const adminClient = getAdminClient()
-  const {
-    data: { user },
-  } = await serverClient.auth.getUser()
-  if (!user) return { error: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) }
+  const canEditTasksModule = hasModulePermission(auth, 'tasks', 'update')
 
-  let userData: any = null
-  const withRole = await adminClient
-    .from('team')
-    .select('id, role, designation, roles (name)')
-    .eq('id', user.id)
-    .single()
-  if (!withRole.error) userData = withRole.data
-  else {
-    const joinOnly = await adminClient
-      .from('team')
-      .select('id, designation, roles (name)')
-      .eq('id', user.id)
-      .single()
-    userData = joinOnly.data
+  const elevated =
+    isFullAccessRole(role) ||
+    hasPermission(role, 'UPDATE_TASK') ||
+    canEditTasksModule ||
+    (hasPermission(role, 'UPDATE_OWN_TASK') && isAssignee)
+
+  if (!elevated) {
+    return NextResponse.json({ error: 'You do not have permission to edit tasks' }, { status: 403 })
   }
 
-  return { adminClient, userId: user.id, role: resolveRole(userData) }
+  const mayEditOthersTasks =
+    isFullAccessRole(role) ||
+    role === 'team_lead' ||
+    hasPermission(role, 'UPDATE_TASK') ||
+    canEditTasksModule
+
+  if (!mayEditOthersTasks && !isAssignee) {
+    return NextResponse.json({ error: 'Cannot edit others tasks' }, { status: 403 })
+  }
+
+  return null
 }
 
 export async function PUT(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const ctx = await getAccessContext()
-  if ('error' in ctx) return ctx.error
-  const { adminClient, userId, role } = ctx
+  const auth = await getAuthContext()
+  if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const { adminClient, userId } = auth
   const { id } = await params
 
   try {
-    if (!isFullAccessRole(role) && !hasPermission(role, 'UPDATE_TASK')) {
-      return NextResponse.json({ error: 'You do not have permission to edit tasks' }, { status: 403 })
-    }
-
     const taskRes = await adminClient.from('tasks').select('*').eq('id', id).maybeSingle()
     if (taskRes.error || !taskRes.data) return NextResponse.json({ error: 'Task not found' }, { status: 404 })
 
-    if (!isFullAccessRole(role) && role !== 'team_lead' && (taskRes.data as any).assignee_id !== userId) {
-      return NextResponse.json({ error: 'Cannot edit others tasks' }, { status: 403 })
-    }
+    const denied = assertCanEditTask(auth, userId, taskRes.data as { assignee_id?: string | null })
+    if (denied) return denied
 
     const body = await request.json()
     const title = String(body.title || '').trim()
@@ -69,7 +64,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
           : String(body.document_url).trim()
         : undefined
 
-    const statusForTask = String(body.status || 'todo')
+    const statusForTask = normalizeTaskWorkflowStatus(String(body.status || 'todo'))
     const completedAtPatch: Record<string, unknown> = {}
     if (statusForTask === 'done') {
       completedAtPatch.completed_at = new Date().toISOString()
@@ -100,7 +95,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
       description: body.description || null,
       assignee_id: assigneeId || null,
       sprint_id: body.sprint_id || null,
-      status: body.status || 'todo',
+      status: statusForTask,
       ...completedAtPatch,
       ...(documentUrl !== undefined ? { document_url: documentUrl } : {}),
     }
@@ -109,7 +104,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
       description: body.description || null,
       assignee_id: assigneeId || null,
       sprint_id: body.sprint_id || null,
-      status: body.status || 'todo',
+      status: statusForTask,
     }
     const estimate = body.estimation != null && body.estimation !== '' ? Number(body.estimation) : 0
     const startDate = body.start_date || null
@@ -153,22 +148,17 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const ctx = await getAccessContext()
-  if ('error' in ctx) return ctx.error
-  const { adminClient, userId, role } = ctx
+  const auth = await getAuthContext()
+  if (!auth.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const { adminClient, userId } = auth
   const { id } = await params
 
   try {
     const taskRes = await adminClient.from('tasks').select('*').eq('id', id).maybeSingle()
     if (taskRes.error || !taskRes.data) return NextResponse.json({ error: 'Task not found' }, { status: 404 })
 
-    if (!isFullAccessRole(role) && !hasPermission(role, 'UPDATE_TASK')) {
-      return NextResponse.json({ error: 'You do not have permission to edit tasks' }, { status: 403 })
-    }
-
-    if (!isFullAccessRole(role) && role !== 'team_lead' && (taskRes.data as any).assignee_id !== userId) {
-      return NextResponse.json({ error: 'Cannot edit others tasks' }, { status: 403 })
-    }
+    const denied = assertCanEditTask(auth, userId, taskRes.data as { assignee_id?: string | null })
+    if (denied) return denied
 
     const body = await request.json()
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }

@@ -9,13 +9,20 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { ArrowLeft, ArrowRight, Check } from 'lucide-react'
 import { projectHref } from '@/lib/slug'
-import { canManageProjects, resolveRole, ROLE_LEVELS } from '@/lib/rbac'
+import { canManageProjects } from '@/lib/rbac'
+import { TaskRichEditor } from '@/components/tasks/task-rich-editor'
+import { TaskAttachmentGallery, type GalleryItem } from '@/components/tasks/task-attachment-gallery'
+import { sanitizeTaskDescriptionHtml } from '@/lib/sanitize-task-html'
 
-function isTeamLeadOrAbove(row: unknown): boolean {
-  const r = resolveRole(row as any)
-  if (!r) return false
-  return ROLE_LEVELS[r] >= ROLE_LEVELS.team_lead
+const PROJECT_ATTACHMENT_ACCEPT = 'image/*,.pdf,application/pdf'
+
+function isAllowedProjectAttachmentFile(file: File): boolean {
+  const t = (file.type || '').toLowerCase()
+  if (t.startsWith('image/')) return true
+  if (t === 'application/pdf') return true
+  return file.name.toLowerCase().endsWith('.pdf')
 }
+
 type DepartmentSource = 'master_table' | 'users_text'
 
 type Department = {
@@ -25,17 +32,10 @@ type Department = {
   source: DepartmentSource
 }
 
-type TeamLead = {
-  id: string
-  full_name: string | null
-  email: string
-}
-
 const STEPS = [
-  { id: 1, name: 'Department', description: 'Select the department' },
-  { id: 2, name: 'Team Lead', description: 'Assign a team lead' },
-  { id: 3, name: 'Project Details', description: 'Enter project information' },
-  { id: 4, name: 'Review', description: 'Confirm and create' },
+  { id: 1, name: 'Select Department', description: 'Choose the owning department' },
+  { id: 2, name: 'Project Details', description: 'Enter project information' },
+  { id: 3, name: 'Review and Publish', description: 'Confirm and publish' },
 ]
 
 export default function NewProjectPage() {
@@ -47,11 +47,11 @@ export default function NewProjectPage() {
 
   // Data
   const [departments, setDepartments] = useState<Department[]>([])
-  const [teamLeads, setTeamLeads] = useState<TeamLead[]>([])
 
   // Form state
   const [selectedDepartment, setSelectedDepartment] = useState<Department | null>(null)
-  const [selectedTeamLead, setSelectedTeamLead] = useState<TeamLead | null>(null)
+  const [projectDraftId, setProjectDraftId] = useState<string | null>(null)
+  const [projectStagedAttachments, setProjectStagedAttachments] = useState<GalleryItem[]>([])
   const [projectData, setProjectData] = useState({
     name: '',
     description: '',
@@ -149,54 +149,74 @@ export default function NewProjectPage() {
     fetchData()
   }, [router, supabase])
 
-  const fetchTeamLeads = async (department: Department) => {
-    try {
-      // Use server API (schema-tolerant fallback: team/users/auth).
-      const res = await fetch('/api/team')
-      const json = await res.json()
-      if (!res.ok) {
-        console.error('Failed to load team leads from /api/team:', json?.error)
-        setTeamLeads([])
-        return
-      }
-      const users = ((json.users || json.data || []) as any[]).filter((u) => u?.is_active !== false)
-
-      const byDepartment = users.filter((u) => {
-        if (department.source === 'master_table') {
-          return u.department_id === department.id || u.department_name === department.name
-        }
-        return u.department === department.name || u.department_name === department.name
-      })
-
-      // Project lead: team_lead, manager, client_admin, master_admin only (not members).
-      const eligible = byDepartment.filter((u) => isTeamLeadOrAbove(u))
-
-      const mapped: TeamLead[] = eligible
-        .map((u) => ({
-          id: String(u.id),
-          full_name: u.full_name || u.name || null,
-          email: String(u.email || ''),
-        }))
-        .filter((u) => !!u.id && !!u.email)
-        .sort((a, b) => (a.full_name || a.email).localeCompare(b.full_name || b.email))
-
-      setTeamLeads(mapped)
-    } catch (error) {
-      console.error('Error fetching team leads:', error)
-      setTeamLeads([])
-    }
-  }
-
-  const handleDepartmentSelect = async (department: Department) => {
+  const handleDepartmentSelect = (department: Department) => {
     setSelectedDepartment(department)
-    setSelectedTeamLead(null) // Reset team lead when department changes
-    await fetchTeamLeads(department)
   }
 
   const handleNext = () => {
-    if (currentStep < 4) {
+    if (currentStep < 3) {
+      if (currentStep === 1) {
+        setProjectDraftId((id) => id || crypto.randomUUID())
+      }
       setCurrentStep(currentStep + 1)
     }
+  }
+
+  async function uploadAttachmentFile(
+    file: File,
+    entityType: 'project_draft' | 'project',
+    entityId: string,
+  ): Promise<GalleryItem & { id: string }> {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('entity_type', entityType)
+    formData.append('entity_id', entityId)
+    const res = await fetch('/api/attachments', { method: 'POST', body: formData })
+    const j = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(j.error || 'Upload failed')
+    const a = j.attachment
+    return {
+      id: a.id,
+      url: a.url ?? null,
+      file_name: a.file_name ?? null,
+      file_type: a.file_type ?? null,
+    }
+  }
+
+  const removeAttachmentById = async (id: string) => {
+    await fetch(`/api/attachments?id=${encodeURIComponent(id)}`, { method: 'DELETE' })
+  }
+
+  const uploadEditorImage = async (file: File): Promise<string | null> => {
+    if (!projectDraftId) return null
+    try {
+      const att = await uploadAttachmentFile(file, 'project_draft', projectDraftId)
+      setProjectStagedAttachments((prev) => [...prev, att])
+      return att.url
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : 'Image upload failed')
+      return null
+    }
+  }
+
+  const handleProjectAttachmentFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = Array.from(e.target.files || [])
+    const files = raw.filter(isAllowedProjectAttachmentFile)
+    const dropped = raw.length - files.length
+    if (dropped > 0) alert('Only images and PDF files are allowed.')
+    if (!projectDraftId) {
+      e.target.value = ''
+      return
+    }
+    for (const file of files) {
+      try {
+        const att = await uploadAttachmentFile(file, 'project_draft', projectDraftId)
+        setProjectStagedAttachments((prev) => [...prev, att])
+      } catch (err: unknown) {
+        alert(err instanceof Error ? err.message : 'Upload failed')
+      }
+    }
+    e.target.value = ''
   }
 
   const handleBack = () => {
@@ -210,27 +230,28 @@ export default function NewProjectPage() {
       case 1:
         return selectedDepartment !== null
       case 2:
-        return selectedTeamLead !== null
-      case 3:
         return projectData.name.trim() !== ''
-      case 4:
-        return selectedDepartment !== null && selectedTeamLead !== null && projectData.name.trim() !== ''
+      case 3:
+        return selectedDepartment !== null && projectData.name.trim() !== ''
       default:
         return false
     }
   }
 
   const handleCreate = async () => {
-    if (!selectedDepartment || !selectedTeamLead) return
+    if (!selectedDepartment) return
 
     setCreating(true)
     try {
+      const descRaw = (projectData.description || '').trim()
+      const descriptionHtml =
+        !descRaw || descRaw === '<p></p>' || descRaw === '<p><br></p>' ? null : projectData.description
+
       const projectPayload: Record<string, unknown> = {
         name: projectData.name.trim(),
-        description: projectData.description.trim() || null,
+        description: descriptionHtml,
         priority: projectData.priority,
         status: 'active',
-        project_lead_id: selectedTeamLead.id,
         onboarded_date: projectData.onboarded_date || null,
         assigned_date: projectData.assigned_date || null,
         projected_end_date: projectData.projected_end_date || null,
@@ -251,6 +272,23 @@ export default function NewProjectPage() {
         const detail = [result?.error, result?.hint].filter(Boolean).join(' — ')
         throw new Error(detail || 'Failed to create project')
       }
+
+      const newProjectId = result.project.id as string
+      if (projectDraftId) {
+        await fetch('/api/attachments/reassign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            draft_entity_id: projectDraftId,
+            from_entity_type: 'project_draft',
+            to_entity_type: 'project',
+            target_entity_id: newProjectId,
+          }),
+        })
+      }
+
+      setProjectStagedAttachments([])
+      setProjectDraftId(null)
 
       // Avoid browser `from('projects')` here: same PostgREST schema as the API; for a new row,
       // slug disambiguation only needs this project.
@@ -338,7 +376,7 @@ export default function NewProjectPage() {
             <div>
               <h3 className="text-lg font-semibold text-foreground mb-4">Select Department</h3>
               <p className="text-muted-foreground mb-6">
-                Choose the department this project belongs to. This determines which team members can be assigned.
+                Choose the department this project belongs to.
               </p>
               {departments.length === 0 ? (
                 <div className="text-center py-8 bg-muted/50 rounded-lg">
@@ -372,44 +410,8 @@ export default function NewProjectPage() {
             </div>
           )}
 
-          {/* Step 2: Select Team Lead */}
+          {/* Step 2: Project Details */}
           {currentStep === 2 && (
-            <div>
-              <h3 className="text-lg font-semibold text-foreground mb-4">Assign Team Lead</h3>
-              <p className="text-muted-foreground mb-6">
-                Select a team lead from the {selectedDepartment?.name} department to manage this project.
-              </p>
-              {teamLeads.length === 0 ? (
-                <div className="text-center py-8 bg-muted/50 rounded-lg">
-                  <p className="text-muted-foreground">
-                    No team members found in this department. Add team members to the department first.
-                  </p>
-                </div>
-              ) : (
-                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {teamLeads.map((lead) => (
-                    <button
-                      key={lead.id}
-                      onClick={() => setSelectedTeamLead(lead)}
-                      className={`p-4 rounded-lg border-2 text-left transition ${
-                        selectedTeamLead?.id === lead.id
-                          ? 'border-primary bg-primary/5'
-                          : 'border-border hover:border-primary/50'
-                      }`}
-                    >
-                      <h4 className="font-semibold text-foreground">
-                        {lead.full_name || 'Unnamed'}
-                      </h4>
-                      <p className="text-sm text-muted-foreground mt-1">{lead.email}</p>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Step 3: Project Details */}
-          {currentStep === 3 && (
             <div>
               <h3 className="text-lg font-semibold text-foreground mb-4">Project Details</h3>
               <p className="text-muted-foreground mb-6">
@@ -434,12 +436,42 @@ export default function NewProjectPage() {
                   <label className="block text-sm font-medium text-foreground mb-2">
                     Description
                   </label>
-                  <textarea
-                    value={projectData.description}
-                    onChange={(e) => setProjectData({ ...projectData, description: e.target.value })}
-                    className="w-full px-4 py-2 border border-input rounded-lg bg-background text-foreground focus:ring-2 focus:ring-primary focus:border-primary"
-                    placeholder="Brief description of the project..."
-                    rows={3}
+                  {projectDraftId ? (
+                    <TaskRichEditor
+                      key={projectDraftId}
+                      content={projectData.description}
+                      onChange={(html) => setProjectData({ ...projectData, description: html })}
+                      placeholder="Describe the project… Paste images from clipboard."
+                      uploadImage={uploadEditorImage}
+                    />
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Open this step from “Next” after selecting a department.</p>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-foreground">Attachments</label>
+                  <p className="text-xs text-muted-foreground">
+                    Images or PDF only. Files upload as you add them; thumbnails open a preview with download.
+                  </p>
+                  <TaskAttachmentGallery
+                    items={projectStagedAttachments}
+                    onRemove={
+                      projectDraftId
+                        ? async (id) => {
+                            await removeAttachmentById(id)
+                            setProjectStagedAttachments((prev) => prev.filter((a) => a.id !== id))
+                          }
+                        : undefined
+                    }
+                  />
+                  <input
+                    type="file"
+                    accept={PROJECT_ATTACHMENT_ACCEPT}
+                    multiple
+                    onChange={handleProjectAttachmentFiles}
+                    disabled={!projectDraftId}
+                    className="block w-full text-sm text-muted-foreground file:mr-2 file:rounded file:border file:bg-background file:px-2 file:py-1 disabled:opacity-50"
                   />
                 </div>
 
@@ -515,34 +547,40 @@ export default function NewProjectPage() {
             </div>
           )}
 
-          {/* Step 4: Review */}
-          {currentStep === 4 && (
+          {/* Step 3: Review and Publish */}
+          {currentStep === 3 && (
             <div>
-              <h3 className="text-lg font-semibold text-foreground mb-4">Review & Create</h3>
+              <h3 className="text-lg font-semibold text-foreground mb-4">Review and Publish</h3>
               <p className="text-muted-foreground mb-6">
-                Review the project details before creating.
+                Review the project details, then publish to create it.
               </p>
               <div className="bg-muted/50 rounded-lg p-6 space-y-4 max-w-2xl">
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <p className="text-sm text-muted-foreground">Department</p>
-                    <p className="font-medium text-foreground">{selectedDepartment?.name}</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground">Team Lead</p>
-                    <p className="font-medium text-foreground">
-                      {selectedTeamLead?.full_name || selectedTeamLead?.email}
-                    </p>
-                  </div>
+                <div>
+                  <p className="text-sm text-muted-foreground">Department</p>
+                  <p className="font-medium text-foreground">{selectedDepartment?.name}</p>
                 </div>
                 <div className="border-t border-border pt-4">
                   <p className="text-sm text-muted-foreground">Project Name</p>
                   <p className="font-medium text-foreground text-lg">{projectData.name}</p>
                 </div>
-                {projectData.description && (
+                {projectData.description &&
+                  projectData.description.trim() !== '' &&
+                  projectData.description.trim() !== '<p></p>' &&
+                  projectData.description.trim() !== '<p><br></p>' && (
                   <div>
                     <p className="text-sm text-muted-foreground">Description</p>
-                    <p className="text-foreground">{projectData.description}</p>
+                    <div
+                      className="text-foreground text-sm max-w-none [&_img]:max-w-full [&_img]:h-auto [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_a]:text-primary [&_a]:underline"
+                      dangerouslySetInnerHTML={{
+                        __html: sanitizeTaskDescriptionHtml(projectData.description),
+                      }}
+                    />
+                  </div>
+                )}
+                {projectStagedAttachments.length > 0 && (
+                  <div>
+                    <p className="text-sm text-muted-foreground mb-2">Attachments</p>
+                    <TaskAttachmentGallery items={projectStagedAttachments} />
                   </div>
                 )}
                 <div className="grid grid-cols-2 gap-4">
@@ -576,7 +614,7 @@ export default function NewProjectPage() {
           Back
         </Button>
         
-        {currentStep < 4 ? (
+        {currentStep < 3 ? (
           <Button
             onClick={handleNext}
             disabled={!canProceed()}
@@ -591,7 +629,7 @@ export default function NewProjectPage() {
             disabled={creating || !canProceed()}
             className="bg-primary"
           >
-            {creating ? 'Creating...' : 'Create Project'}
+            {creating ? 'Publishing...' : 'Publish project'}
             <Check className="w-4 h-4 ml-2" />
           </Button>
         )}

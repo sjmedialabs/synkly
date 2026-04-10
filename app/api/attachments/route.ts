@@ -1,5 +1,41 @@
 import { NextRequest, NextResponse } from 'next/server'
+import type { SupabaseClient } from '@supabase/supabase-js'
 import { getAuthContext } from '@/lib/rbac-server'
+
+const ATTACHMENTS_BUCKET = 'attachments'
+
+function isAttachmentsTableMissing(err: { code?: string; message?: string } | null): boolean {
+  if (!err) return false
+  if (err.code === 'PGRST205') return true
+  return /could not find the table.*attachments/i.test(String(err.message || ''))
+}
+
+/** Supabase Storage errors vary by version; treat missing bucket / 404 as recoverable. */
+function isStorageBucketMissing(uploadError: unknown): boolean {
+  if (!uploadError) return false
+  const e = uploadError as Record<string, unknown>
+  const parts = [e.message, e.error, e.statusCode, e.status, String(uploadError)].filter(Boolean)
+  const text = parts.join(' ').toLowerCase()
+  if (text.includes('bucket not found') || text.includes('not found')) return true
+  const code = e.statusCode ?? e.status
+  return code === '404' || code === 404
+}
+
+function attachmentsSetupHint() {
+  return 'Database table public.attachments is missing. Run the SQL in scripts/023_attachments.sql (and 027/028 if you use drafts), then reload the schema in Supabase.'
+}
+
+/** Creates bucket if this project never set up Storage (service role). Ignores "already exists". */
+async function ensureAttachmentsBucket(adminClient: SupabaseClient) {
+  const { error } = await adminClient.storage.createBucket(ATTACHMENTS_BUCKET, {
+    public: true,
+    fileSizeLimit: 10485760, // 10MB, matches upload limit in this route
+  })
+  if (!error) return
+  const m = (error.message || '').toLowerCase()
+  if (m.includes('already') || m.includes('exists') || m.includes('duplicate')) return
+  console.warn('[attachments] createBucket:', error.message)
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -31,6 +67,9 @@ export async function POST(request: NextRequest) {
 
       if (error) {
         console.error('[attachments] Link insert error:', error)
+        if (isAttachmentsTableMissing(error)) {
+          return NextResponse.json({ error: attachmentsSetupHint() }, { status: 503 })
+        }
         return NextResponse.json({ error: error.message }, { status: 500 })
       }
 
@@ -60,17 +99,27 @@ export async function POST(request: NextRequest) {
     const arrayBuffer = await file.arrayBuffer()
     const buffer = new Uint8Array(arrayBuffer)
 
-    const { error: uploadError } = await ctx.adminClient.storage
-      .from('attachments')
-      .upload(storagePath, buffer, {
+    let uploadError = (
+      await ctx.adminClient.storage.from(ATTACHMENTS_BUCKET).upload(storagePath, buffer, {
         contentType: file.type || 'application/octet-stream',
         upsert: false,
       })
+    ).error
+
+    if (uploadError && isStorageBucketMissing(uploadError)) {
+      await ensureAttachmentsBucket(ctx.adminClient)
+      uploadError = (
+        await ctx.adminClient.storage.from(ATTACHMENTS_BUCKET).upload(storagePath, buffer, {
+          contentType: file.type || 'application/octet-stream',
+          upsert: false,
+        })
+      ).error
+    }
 
     if (uploadError) {
       console.error('[attachments] Storage upload error:', uploadError)
-      // If storage bucket doesn't exist, still save the record with file metadata
-      if (uploadError.message?.includes('not found') || uploadError.message?.includes('Bucket')) {
+      // Bucket still missing or other storage failure: save DB row only when bucket truly unavailable.
+      if (isStorageBucketMissing(uploadError)) {
         const { data, error: insertError } = await ctx.adminClient
           .from('attachments')
           .insert({
@@ -86,17 +135,36 @@ export async function POST(request: NextRequest) {
           .single()
 
         if (insertError) {
+          if (isAttachmentsTableMissing(insertError)) {
+            return NextResponse.json(
+              {
+                error: attachmentsSetupHint(),
+                hint_storage:
+                  'Also create Storage bucket "attachments" (or retry upload after running SQL) — the app auto-creates the bucket when possible.',
+              },
+              { status: 503 },
+            )
+          }
           return NextResponse.json({ error: insertError.message }, { status: 500 })
         }
-        return NextResponse.json({ attachment: data, storage_warning: 'File saved to DB only — create "attachments" bucket in Supabase Storage.' }, { status: 201 })
+        return NextResponse.json(
+          {
+            attachment: data,
+            storage_warning:
+              'Storage bucket "attachments" is missing — row saved without a file URL. Create the bucket in Supabase Storage or retry after the first successful auto-create.',
+          },
+          { status: 201 },
+        )
       }
-      return NextResponse.json({ error: uploadError.message }, { status: 500 })
+      const msg =
+        typeof (uploadError as { message?: string }).message === 'string'
+          ? (uploadError as { message: string }).message
+          : String(uploadError)
+      return NextResponse.json({ error: msg }, { status: 500 })
     }
 
     // Get public URL
-    const { data: urlData } = ctx.adminClient.storage
-      .from('attachments')
-      .getPublicUrl(storagePath)
+    const { data: urlData } = ctx.adminClient.storage.from(ATTACHMENTS_BUCKET).getPublicUrl(storagePath)
 
     // Save record to attachments table
     const { data, error: insertError } = await ctx.adminClient
@@ -116,6 +184,9 @@ export async function POST(request: NextRequest) {
 
     if (insertError) {
       console.error('[attachments] DB insert error:', insertError)
+      if (isAttachmentsTableMissing(insertError)) {
+        return NextResponse.json({ error: attachmentsSetupHint() }, { status: 503 })
+      }
       return NextResponse.json({ error: insertError.message }, { status: 500 })
     }
 
@@ -175,7 +246,7 @@ export async function DELETE(request: NextRequest) {
       .single()
 
     if (attachment?.storage_path) {
-      await ctx.adminClient.storage.from('attachments').remove([attachment.storage_path])
+      await ctx.adminClient.storage.from(ATTACHMENTS_BUCKET).remove([attachment.storage_path])
     }
 
     const { error } = await ctx.adminClient.from('attachments').delete().eq('id', id)

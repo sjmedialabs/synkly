@@ -1,19 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { can, canAccessAll, getAuthContext } from '@/lib/rbac-server'
-import { canAccessClientScope } from '@/lib/rbac'
+import { can, canAccessAll, getAuthContext, hasModulePermission } from '@/lib/rbac-server'
+import { canAccessClientScope, hasPermission } from '@/lib/rbac'
 import {
+  fetchActivePeopleForAssignment,
   filterPeopleToAssignableTaskRoles,
   type AssignmentPersonRow,
 } from '@/lib/people-for-assignment'
 
-// Restricted designation names
 const RESTRICTED_DESIGNATIONS = ['Super Admin', 'Delivery Manager']
+
+type ListedUser = {
+  id: string
+  email: string
+  full_name: string | null
+  designation: string | null
+  department: string | null
+  reporting_manager_id: string | null
+  client_id: string | null
+}
+
+function canListAssignablePeople(ctx: Awaited<ReturnType<typeof getAuthContext>>): boolean {
+  if (!ctx.userId || !ctx.role) return false
+  return (
+    canAccessAll(ctx.role) ||
+    canAccessClientScope(ctx.role) ||
+    can(ctx.role, 'ASSIGN_TASK') ||
+    hasPermission(ctx.role, 'CREATE_TASK') ||
+    hasPermission(ctx.role, 'UPDATE_TASK') ||
+    hasModulePermission(ctx, 'tasks', 'create') ||
+    hasModulePermission(ctx, 'tasks', 'update') ||
+    hasModulePermission(ctx, 'tasks', 'assign')
+  )
+}
 
 export async function GET(request: NextRequest) {
   try {
     const ctx = await getAuthContext()
     if (!ctx.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    if (!canAccessAll(ctx.role) && !canAccessClientScope(ctx.role) && !can(ctx.role, 'ASSIGN_TASK')) {
+    if (!canListAssignablePeople(ctx)) {
       return NextResponse.json({ error: 'Access Denied' }, { status: 403 })
     }
 
@@ -22,32 +46,33 @@ export async function GET(request: NextRequest) {
     const showAll = searchParams.get('all') === 'true'
 
     const admin = ctx.adminClient
-    const { data: allUsers, error: usersError } = await admin
-      .from('team')
-      .select('id, email, full_name, designation, department, reporting_manager_id, is_active, client_id')
-      .eq('is_active', true)
-      .order('full_name', { ascending: true })
+    const bundle = await fetchActivePeopleForAssignment(admin)
 
-    if (usersError) {
-      return NextResponse.json({ error: usersError.message }, { status: 500 })
-    }
+    let allUsers: ListedUser[] = bundle.rows.map((u) => ({
+      id: u.id,
+      email: u.email,
+      full_name: u.full_name,
+      designation: typeof u.designation === 'string' ? u.designation : u.designation != null ? String(u.designation) : null,
+      department: typeof u.department === 'string' ? u.department : u.department != null ? String(u.department) : null,
+      reporting_manager_id: u.reporting_manager_id,
+      client_id: u.client_id,
+    }))
 
-    const assignableUsers = (allUsers || []).filter((user) => {
+    allUsers.sort((a, b) => String(a.full_name || a.email).localeCompare(String(b.full_name || b.email)))
+
+    const assignableUsers = allUsers.filter((user) => {
       if (!user.designation) return true
-      return !RESTRICTED_DESIGNATIONS.includes(user.designation as string)
+      return !RESTRICTED_DESIGNATIONS.includes(user.designation)
     })
 
     let finalUsers = assignableUsers
     if (canAccessAll(ctx.role) || canAccessClientScope(ctx.role)) {
-      // Admin and manager: see all users in their client scope
       if (ctx.clientId) {
-        finalUsers = finalUsers.filter((u: any) => !u.client_id || u.client_id === ctx.clientId)
+        finalUsers = finalUsers.filter((u) => !u.client_id || u.client_id === ctx.clientId)
       }
     } else if (ctx.role === 'team_lead') {
-      // Team lead: only direct reports
       finalUsers = finalUsers.filter((u) => u.reporting_manager_id === ctx.userId)
     } else {
-      // Members: only themselves
       finalUsers = finalUsers.filter((u) => u.id === ctx.userId)
     }
 
@@ -63,9 +88,8 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // When all=true, skip strict role filtering (for create task form)
     if (!showAll) {
-      const asRows: AssignmentPersonRow[] = finalUsers.map((u: any) => ({
+      const asRows: AssignmentPersonRow[] = finalUsers.map((u) => ({
         id: u.id,
         email: String(u.email || ''),
         full_name: u.full_name ?? null,

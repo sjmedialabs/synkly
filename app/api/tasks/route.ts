@@ -8,6 +8,7 @@ import {
   resolveAssignmentPersonRole,
 } from '@/lib/people-for-assignment'
 import { hasPermission, isAssignableTaskRole, isFullAccessRole } from '@/lib/rbac'
+import { normalizeTaskWorkflowStatus } from '@/lib/task-workflow-status'
 
 function isMissingTasksTable(err: { code?: string; message?: string } | null) {
   if (!err) return false
@@ -129,6 +130,13 @@ export async function GET() {
 
     await hydrateTaskAssignees(adminClient, taskRows)
 
+    for (const t of taskRows) {
+      if (t && typeof (t as any).status === 'string') {
+        const n = normalizeTaskWorkflowStatus((t as any).status)
+        if (n !== (t as any).status) (t as any).status = n
+      }
+    }
+
     let assignees: { id: string; full_name: string | null; email: string }[] = []
     const peopleBundle = await fetchActivePeopleForAssignment(adminClient)
     if (peopleBundle.rows.length > 0) {
@@ -171,8 +179,9 @@ export async function PATCH(request: NextRequest) {
   try {
     const body = await request.json()
     const taskId = String(body.taskId || '')
-    const status = String(body.status || '')
-    if (!taskId || !status) return NextResponse.json({ error: 'taskId and status are required' }, { status: 400 })
+    const rawStatus = String(body.status || '').trim()
+    if (!taskId || !rawStatus) return NextResponse.json({ error: 'taskId and status are required' }, { status: 400 })
+    const status = normalizeTaskWorkflowStatus(rawStatus)
 
     const taskRes = await adminClient
       .from('tasks')

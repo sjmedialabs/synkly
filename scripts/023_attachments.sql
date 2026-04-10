@@ -1,3 +1,5 @@
+-- Run this script in Supabase → SQL Editor. Paste ONLY these SQL statements (not HTTP logs or terminal output).
+--
 -- Attachments table for projects and tasks
 CREATE TABLE IF NOT EXISTS public.attachments (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,

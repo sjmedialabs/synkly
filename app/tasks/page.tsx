@@ -22,6 +22,8 @@ import { DashboardLayout } from '@/components/layout/dashboard-layout'
 import { SmartAssignModal } from '@/components/tasks/smart-assign-modal'
 import { hasPermission, isFullAccessRole } from '@/lib/rbac'
 import { cn } from '@/lib/utils'
+import { normalizeTaskWorkflowStatus } from '@/lib/task-workflow-status'
+import { sanitizeTaskDescriptionHtml } from '@/lib/sanitize-task-html'
 
 type Task = {
   id: string
@@ -183,7 +185,7 @@ function TaskCardInner({
           {!isOverlay ? (
             <div className="mt-1.5 pt-1.5 border-t border-border opacity-0 group-hover:opacity-100 transition flex gap-1">
               <select
-                value={task.status}
+                value={normalizeTaskWorkflowStatus(task.status)}
                 onChange={(e) => onStatusChange(task.id, e.target.value)}
                 onClick={(e) => e.stopPropagation()}
                 className="flex-1 min-w-0 text-[10px] px-1 py-0.5 border border-input rounded bg-background text-foreground"
@@ -352,16 +354,28 @@ export default function TasksPage() {
 
   const handleStatusChange = async (taskId: string, newStatus: string) => {
     const current = tasks.find((t) => t.id === taskId)
-    if (!current || current.status === newStatus) return
+    const canonical = normalizeTaskWorkflowStatus(newStatus)
+    if (!current || normalizeTaskWorkflowStatus(current.status) === canonical) return
 
     const previousStatus = current.status
-    setTasks((prev) => prev.map((task) => (task.id === taskId ? { ...task, status: newStatus } : task)))
+    const previousCompletedAt = current.completed_at
+    setTasks((prev) =>
+      prev.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              status: canonical,
+              completed_at: canonical === 'done' ? new Date().toISOString() : null,
+            }
+          : task,
+      ),
+    )
 
     try {
       const statusRes = await fetch('/api/tasks', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId, status: newStatus }),
+        body: JSON.stringify({ taskId, status: canonical }),
       })
       const statusJson = await statusRes.json()
       if (!statusRes.ok) throw new Error(statusJson.error || 'Failed to update task')
@@ -374,7 +388,11 @@ export default function TasksPage() {
     } catch (error: any) {
       console.error('Error updating task:', error)
       setTasks((prev) =>
-        prev.map((task) => (task.id === taskId ? { ...task, status: previousStatus } : task)),
+        prev.map((task) =>
+          task.id === taskId
+            ? { ...task, status: previousStatus, completed_at: previousCompletedAt }
+            : task,
+        ),
       )
       alert('Error updating task: ' + error.message)
     }
@@ -383,7 +401,10 @@ export default function TasksPage() {
   const resolveDropStatus = (overId: string): ColumnId | null => {
     if (isColumnId(overId)) return overId
     const hit = tasks.find((t) => t.id === overId)
-    if (hit && isColumnId(hit.status)) return hit.status
+    if (hit) {
+      const col = normalizeTaskWorkflowStatus(hit.status)
+      if (isColumnId(col)) return col
+    }
     return null
   }
 
@@ -402,7 +423,7 @@ export default function TasksPage() {
     if (!targetStatus) return
 
     const task = tasks.find((t) => t.id === taskId)
-    if (!task || task.status === targetStatus) return
+    if (!task || normalizeTaskWorkflowStatus(task.status) === targetStatus) return
 
     void handleStatusChange(taskId, targetStatus)
   }
@@ -422,7 +443,7 @@ export default function TasksPage() {
   )
 
   const filteredTasks = tasks.filter((task) => {
-    if (filterStatus && task.status !== filterStatus) return false
+    if (filterStatus && normalizeTaskWorkflowStatus(task.status) !== filterStatus) return false
     if (filterPriority && task.priority !== filterPriority) return false
     if (filterAssignee && task.assignee_id !== filterAssignee) return false
     if (filterProject && task.project_id !== filterProject) return false
@@ -430,10 +451,10 @@ export default function TasksPage() {
   })
 
   const groupedByStatus: Record<ColumnId, Task[]> = {
-    todo: filteredTasks.filter((t) => t.status === 'todo'),
-    in_progress: filteredTasks.filter((t) => t.status === 'in_progress'),
-    in_review: filteredTasks.filter((t) => t.status === 'in_review'),
-    done: filteredTasks.filter((t) => t.status === 'done'),
+    todo: filteredTasks.filter((t) => normalizeTaskWorkflowStatus(t.status) === 'todo'),
+    in_progress: filteredTasks.filter((t) => normalizeTaskWorkflowStatus(t.status) === 'in_progress'),
+    in_review: filteredTasks.filter((t) => normalizeTaskWorkflowStatus(t.status) === 'in_review'),
+    done: filteredTasks.filter((t) => normalizeTaskWorkflowStatus(t.status) === 'done'),
   }
 
   if (loading) {
@@ -565,9 +586,9 @@ export default function TasksPage() {
       </DndContext>
 
       {selectedTaskForDetails ? (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl rounded-lg border border-border bg-card shadow-lg">
-            <div className="flex items-center justify-between p-4 border-b border-border">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="flex max-h-[min(90vh,calc(100vh-2rem))] w-full max-w-2xl min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-lg">
+            <div className="flex shrink-0 items-center justify-between border-b border-border bg-card p-4">
               <h3 className="text-lg font-semibold text-foreground">Task Details</h3>
               <button
                 type="button"
@@ -577,16 +598,23 @@ export default function TasksPage() {
                 Close
               </button>
             </div>
-            <div className="p-4 space-y-3 text-sm">
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 space-y-3 text-sm">
               <div>
                 <p className="text-muted-foreground text-xs">Title</p>
                 <p className="text-foreground font-medium">{selectedTaskForDetails.title}</p>
               </div>
               <div>
                 <p className="text-muted-foreground text-xs">Description</p>
-                <p className="text-foreground whitespace-pre-wrap">
-                  {selectedTaskForDetails.description || 'No description'}
-                </p>
+                {selectedTaskForDetails.description ? (
+                  <div
+                    className="text-foreground text-sm max-w-none overflow-x-auto [&_img]:max-w-full [&_img]:h-auto [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_a]:text-primary [&_a]:underline"
+                    dangerouslySetInnerHTML={{
+                      __html: sanitizeTaskDescriptionHtml(selectedTaskForDetails.description),
+                    }}
+                  />
+                ) : (
+                  <p className="text-foreground">No description</p>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div><span className="text-muted-foreground text-xs">Status</span><p className="capitalize">{selectedTaskForDetails.status.replace('_', ' ')}</p></div>

@@ -14,6 +14,9 @@ import {
   moduleUrlSegment,
   projectHref,
 } from '@/lib/slug'
+import { hydrateTaskAssigneesClient } from '@/lib/hydrate-task-assignees-client'
+import { TaskRichEditor } from '@/components/tasks/task-rich-editor'
+import { TaskAttachmentGallery, type GalleryItem } from '@/components/tasks/task-attachment-gallery'
 
 type ModuleRecord = {
   id: string
@@ -75,11 +78,10 @@ export default function ProjectModuleDetailPage() {
   const [showNewSprintInput, setShowNewSprintInput] = useState(false)
   const [newSprintName, setNewSprintName] = useState('')
   const [creatingSprint, setCreatingSprint] = useState(false)
-  const [taskAttachments, setTaskAttachments] = useState<File[]>([])
-  const [taskLinks, setTaskLinks] = useState<string[]>([])
+  const [createDraftId, setCreateDraftId] = useState<string | null>(null)
+  const [createStagedAttachments, setCreateStagedAttachments] = useState<GalleryItem[]>([])
   const [newLink, setNewLink] = useState('')
-  const [editTaskAttachments, setEditTaskAttachments] = useState<File[]>([])
-  const [editTaskLinks, setEditTaskLinks] = useState<string[]>([])
+  const [editAttachmentList, setEditAttachmentList] = useState<GalleryItem[]>([])
   const [editNewLink, setEditNewLink] = useState('')
   const [newTask, setNewTask] = useState({
     title: '',
@@ -207,10 +209,31 @@ export default function ProjectModuleDetailPage() {
       ])
 
       setModule(moduleData)
-      setTasks(((tasksRes.data || []) as any[]).map((task) => ({
-        ...task,
-        assignee: null,
-      })))
+      let members: { id: string; full_name: string | null; email: string }[] = []
+      if (assignableRes.ok) {
+        try {
+          const uj = await assignableRes.json()
+          members = (uj.users || []).map((u: any) => ({
+            id: u.id,
+            full_name: u.full_name ?? null,
+            email: u.email ?? '',
+          }))
+        } catch {
+          members = []
+        }
+      } else {
+        let errBody: string | undefined
+        try {
+          const j = await assignableRes.json()
+          errBody = j?.error || assignableRes.statusText
+        } catch {
+          errBody = assignableRes.statusText
+        }
+        console.warn('[module] assignable-users failed:', assignableRes.status, errBody)
+      }
+      const taskRows = (tasksRes.data || []) as Record<string, unknown>[]
+      const hydratedTasks = await hydrateTaskAssigneesClient(supabase, taskRows, members)
+      setTasks(hydratedTasks as TaskRecord[])
       let sprintJson: { sprints?: any[]; error?: string } = { sprints: [] }
       try {
         sprintJson = await sprintsRes.json()
@@ -226,19 +249,6 @@ export default function ProjectModuleDetailPage() {
           name: String(s.name ?? s.sprint_name ?? 'Sprint').trim() || 'Sprint',
         })),
       )
-      let members: { id: string; full_name: string | null; email: string }[] = []
-      if (assignableRes.ok) {
-        try {
-          const uj = await assignableRes.json()
-          members = (uj.users || []).map((u: any) => ({
-            id: u.id,
-            full_name: u.full_name ?? null,
-            email: u.email ?? '',
-          }))
-        } catch {
-          members = []
-        }
-      }
       setTeamMembers(members)
       setLoading(false)
     }
@@ -261,45 +271,94 @@ export default function ProjectModuleDetailPage() {
     0,
   )
 
-  async function uploadTaskAttachments(
-    taskId: string,
-    files: File[],
-    linkUrls: string[],
-  ): Promise<string | null> {
-    let firstUrl: string | null = null
-    for (const file of files) {
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('entity_type', 'task')
-      formData.append('entity_id', taskId)
-      const res = await fetch('/api/attachments', { method: 'POST', body: formData })
-      let j: { attachment?: { url?: string | null } } = {}
-      try {
-        j = await res.json()
-      } catch {
-        j = {}
-      }
-      const u = j.attachment?.url
-      if (typeof u === 'string' && u.trim() && !firstUrl) firstUrl = u.trim()
+  async function uploadAttachmentFile(
+    file: File,
+    entityType: 'task_draft' | 'task',
+    entityId: string,
+  ): Promise<GalleryItem & { id: string }> {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('entity_type', entityType)
+    formData.append('entity_id', entityId)
+    const res = await fetch('/api/attachments', { method: 'POST', body: formData })
+    const j = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(j.error || 'Upload failed')
+    const a = j.attachment
+    return {
+      id: a.id,
+      url: a.url ?? null,
+      file_name: a.file_name ?? null,
+      file_type: a.file_type ?? null,
     }
-    for (const url of linkUrls) {
-      const res = await fetch('/api/attachments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entity_type: 'task', entity_id: taskId, url }),
-      })
-      let j: { attachment?: { url?: string | null } } = {}
-      try {
-        j = await res.json()
-      } catch {
-        j = {}
-      }
-      const u = (typeof j.attachment?.url === 'string' && j.attachment.url.trim()
-        ? j.attachment.url.trim()
-        : null) || url.trim()
-      if (u && !firstUrl) firstUrl = u
+  }
+
+  async function postLinkAttachment(entityType: 'task_draft' | 'task', entityId: string, url: string) {
+    const res = await fetch('/api/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entity_type: entityType, entity_id: entityId, url }),
+    })
+    const j = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(j.error || 'Failed to save link')
+    const a = j.attachment
+    return {
+      id: a.id as string,
+      url: (a.url as string | null) ?? url,
+      file_name: (a.file_name as string | null) ?? url,
+      file_type: (a.file_type as string | null) ?? 'link',
+    } as GalleryItem & { id: string }
+  }
+
+  const removeAttachmentById = async (id: string) => {
+    await fetch(`/api/attachments?id=${encodeURIComponent(id)}`, { method: 'DELETE' })
+  }
+
+  const openCreateTaskModal = () => {
+    setCreateDraftId(crypto.randomUUID())
+    setCreateStagedAttachments([])
+    setNewLink('')
+    setNewTask({
+      title: '',
+      description: '',
+      document_url: '',
+      sprint_id: '',
+      assignee_id: '',
+      estimation: '',
+      start_date: '',
+      end_date: '',
+    })
+    setShowCreateTaskModal(true)
+  }
+
+  const closeCreateTaskModal = () => {
+    setShowCreateTaskModal(false)
+    setCreateDraftId(null)
+    setCreateStagedAttachments([])
+    setNewLink('')
+  }
+
+  const uploadEditorImageCreate = async (file: File): Promise<string | null> => {
+    if (!createDraftId) return null
+    try {
+      const att = await uploadAttachmentFile(file, 'task_draft', createDraftId)
+      setCreateStagedAttachments((prev) => [...prev, att])
+      return att.url
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : 'Image upload failed')
+      return null
     }
-    return firstUrl
+  }
+
+  const uploadEditorImageEdit = async (file: File): Promise<string | null> => {
+    if (!editingTaskId) return null
+    try {
+      const att = await uploadAttachmentFile(file, 'task', editingTaskId)
+      setEditAttachmentList((prev) => [...prev, att])
+      return att.url
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : 'Image upload failed')
+      return null
+    }
   }
 
   const fetchTasks = async () => {
@@ -309,10 +368,9 @@ export default function ProjectModuleDetailPage() {
       .select('*')
       .eq('module_id', module.id)
       .order('created_at', { ascending: false })
-    setTasks(((tasksRes.data || []) as any[]).map((task) => ({
-      ...task,
-      assignee: null,
-    })))
+    const rows = (tasksRes.data || []) as Record<string, unknown>[]
+    const hydrated = await hydrateTaskAssigneesClient(supabase, rows, teamMembers)
+    setTasks(hydrated as TaskRecord[])
   }
 
   const handleCreateTask = async (e: React.FormEvent) => {
@@ -321,12 +379,15 @@ export default function ProjectModuleDetailPage() {
     setCreatingTask(true)
     try {
       const docFromField = newTask.document_url.trim() || null
+      const descRaw = (newTask.description || '').trim()
+      const descriptionHtml =
+        !descRaw || descRaw === '<p></p>' || descRaw === '<p><br></p>' ? null : newTask.description
       const response = await fetch('/api/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: newTask.title.trim(),
-          description: newTask.description.trim() || null,
+          description: descriptionHtml,
           module_id: module.id,
           project_id: module.project_id,
           sprint_id: newTask.sprint_id || null,
@@ -344,20 +405,25 @@ export default function ProjectModuleDetailPage() {
       }
 
       const taskId = result.task?.id as string | undefined
-      if (taskId && (taskAttachments.length > 0 || taskLinks.length > 0)) {
-        const uploadedFirst = await uploadTaskAttachments(taskId, taskAttachments, taskLinks)
-        if (!docFromField && uploadedFirst) {
-          await fetch(`/api/tasks/${taskId}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ document_url: uploadedFirst }),
-          })
-        }
+      if (taskId && createDraftId) {
+        await fetch('/api/attachments/reassign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ draft_entity_id: createDraftId, task_id: taskId }),
+        })
+      }
+      const stagedFirstUrl = createStagedAttachments.find((a) => a.url)?.url ?? null
+      if (taskId && !docFromField && stagedFirstUrl) {
+        await fetch(`/api/tasks/${taskId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ document_url: stagedFirstUrl }),
+        })
       }
       await fetchTasks()
       setShowCreateTaskModal(false)
-      setTaskAttachments([])
-      setTaskLinks([])
+      setCreateDraftId(null)
+      setCreateStagedAttachments([])
       setNewLink('')
       setNewTask({
         title: '',
@@ -404,34 +470,77 @@ export default function ProjectModuleDetailPage() {
     }
   }
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []).filter(isAllowedTaskAttachmentFile)
-    const dropped = Array.from(e.target.files || []).length - files.length
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = Array.from(e.target.files || [])
+    const files = raw.filter(isAllowedTaskAttachmentFile)
+    const dropped = raw.length - files.length
     if (dropped > 0) {
       alert('Only images and PDF files are allowed.')
     }
-    setTaskAttachments((prev) => [...prev, ...files])
+    if (!createDraftId) {
+      alert('Draft not ready — close and reopen Create Task.')
+      e.target.value = ''
+      return
+    }
+    for (const file of files) {
+      try {
+        const att = await uploadAttachmentFile(file, 'task_draft', createDraftId)
+        setCreateStagedAttachments((prev) => [...prev, att])
+      } catch (err: any) {
+        alert(err.message || 'Upload failed')
+      }
+    }
     e.target.value = ''
   }
 
-  const handleEditFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []).filter(isAllowedTaskAttachmentFile)
-    const dropped = Array.from(e.target.files || []).length - files.length
+  const handleEditFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = Array.from(e.target.files || [])
+    const files = raw.filter(isAllowedTaskAttachmentFile)
+    const dropped = raw.length - files.length
     if (dropped > 0) {
       alert('Only images and PDF files are allowed.')
     }
-    setEditTaskAttachments((prev) => [...prev, ...files])
+    const tid = editingTaskId
+    if (!tid) {
+      e.target.value = ''
+      return
+    }
+    for (const file of files) {
+      try {
+        const att = await uploadAttachmentFile(file, 'task', tid)
+        setEditAttachmentList((prev) => [...prev, att])
+      } catch (err: any) {
+        alert(err.message || 'Upload failed')
+      }
+    }
     e.target.value = ''
   }
 
-  const handleAddLink = () => {
+  const handleAddCreateLink = async () => {
     const url = newLink.trim()
-    if (!url) return
-    setTaskLinks((prev) => [...prev, url])
-    setNewLink('')
+    if (!url || !createDraftId) return
+    try {
+      const att = await postLinkAttachment('task_draft', createDraftId, url)
+      setCreateStagedAttachments((prev) => [...prev, att])
+      setNewLink('')
+    } catch (err: any) {
+      alert(err.message || 'Failed to add link')
+    }
   }
 
-  const openEditTaskModal = (task: TaskRecord) => {
+  const handleAddEditLink = async () => {
+    const url = editNewLink.trim()
+    if (!url || !editingTaskId) return
+    try {
+      const att = await postLinkAttachment('task', editingTaskId, url)
+      setEditAttachmentList((prev) => [...prev, att])
+      setEditNewLink('')
+    } catch (err: any) {
+      alert(err.message || 'Failed to add link')
+    }
+  }
+
+  const openEditTaskModal = async (task: TaskRecord) => {
     setEditingTaskId(task.id)
     setEditTask({
       title: task.title || '',
@@ -444,9 +553,24 @@ export default function ProjectModuleDetailPage() {
       end_date: task.end_date || '',
       status: task.status || 'todo',
     })
-    setEditTaskAttachments([])
-    setEditTaskLinks([])
     setEditNewLink('')
+    let list: GalleryItem[] = []
+    try {
+      const r = await fetch(`/api/attachments?entity_type=task&entity_id=${encodeURIComponent(task.id)}`)
+      const j = await r.json()
+      list = (j.attachments || []).map((a: unknown) => {
+        const row = a as GalleryItem & { id: string }
+        return {
+          id: row.id,
+          url: row.url ?? null,
+          file_name: row.file_name ?? null,
+          file_type: row.file_type ?? null,
+        }
+      })
+    } catch {
+      list = []
+    }
+    setEditAttachmentList(list)
     setShowEditTaskModal(true)
   }
 
@@ -455,12 +579,17 @@ export default function ProjectModuleDetailPage() {
     if (!editingTaskId || !editTask.title.trim()) return
     setEditingTask(true)
     try {
+      const editDescRaw = (editTask.description || '').trim()
+      const editDescriptionHtml =
+        !editDescRaw || editDescRaw === '<p></p>' || editDescRaw === '<p><br></p>'
+          ? null
+          : editTask.description
       const response = await fetch(`/api/tasks/${editingTaskId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: editTask.title.trim(),
-          description: editTask.description.trim() || null,
+          description: editDescriptionHtml,
           document_url: editTask.document_url.trim() || null,
           sprint_id: editTask.sprint_id || null,
           assignee_id: editTask.assignee_id || null,
@@ -474,19 +603,13 @@ export default function ProjectModuleDetailPage() {
       if (!response.ok) throw new Error(result?.error || 'Failed to update task')
 
       const docField = editTask.document_url.trim()
-      if (editingTaskId && (editTaskAttachments.length > 0 || editTaskLinks.length > 0)) {
-        const uploadedFirst = await uploadTaskAttachments(
-          editingTaskId,
-          editTaskAttachments,
-          editTaskLinks,
-        )
-        if (!docField && uploadedFirst) {
-          await fetch(`/api/tasks/${editingTaskId}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ document_url: uploadedFirst }),
-          })
-        }
+      const stagedFirst = editAttachmentList.find((a) => a.url)?.url ?? null
+      if (editingTaskId && !docField && stagedFirst) {
+        await fetch(`/api/tasks/${editingTaskId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ document_url: stagedFirst }),
+        })
       }
 
       await fetchTasks()
@@ -504,7 +627,7 @@ export default function ProjectModuleDetailPage() {
       title={module.name}
       actions={
         <div className="flex items-center gap-2">
-          <Button size="sm" onClick={() => setShowCreateTaskModal(true)}>
+          <Button size="sm" onClick={openCreateTaskModal}>
             <Plus className="w-4 h-4 mr-2" />
             Create Task
           </Button>
@@ -594,12 +717,7 @@ export default function ProjectModuleDetailPage() {
               <h3 className="text-lg font-semibold">Create Task</h3>
               <button
                 type="button"
-                onClick={() => {
-                  setShowCreateTaskModal(false)
-                  setTaskAttachments([])
-                  setTaskLinks([])
-                  setNewLink('')
-                }}
+                onClick={closeCreateTaskModal}
                 className="text-muted-foreground hover:text-foreground"
               >
                 <X className="w-5 h-5" />
@@ -619,12 +737,16 @@ export default function ProjectModuleDetailPage() {
                 </div>
                 <div className="col-span-2">
                   <label className="block text-sm mb-2">Description</label>
-                  <textarea
-                    value={newTask.description}
-                    onChange={(e) => setNewTask({ ...newTask, description: e.target.value })}
-                    className="w-full px-4 py-2 border border-input rounded-lg bg-background"
-                    rows={3}
-                  />
+                  {createDraftId ? (
+                    <TaskRichEditor
+                      key={createDraftId}
+                      content={newTask.description}
+                      onChange={(html) => setNewTask({ ...newTask, description: html })}
+                      uploadImage={uploadEditorImageCreate}
+                    />
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Preparing editor…</p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm mb-2">Sprint</label>
@@ -720,6 +842,16 @@ export default function ProjectModuleDetailPage() {
                 </div>
                 <div className="col-span-2 space-y-2">
                   <label className="block text-sm mb-1">Attachments (images or PDF)</label>
+                  <p className="text-xs text-muted-foreground">
+                    Files upload immediately. Thumbnails open a preview; use Download in the preview or below.
+                  </p>
+                  <TaskAttachmentGallery
+                    items={createStagedAttachments}
+                    onRemove={async (id) => {
+                      await removeAttachmentById(id)
+                      setCreateStagedAttachments((prev) => prev.filter((a) => a.id !== id))
+                    }}
+                  />
                   <input
                     type="file"
                     accept={TASK_ATTACHMENT_ACCEPT}
@@ -727,24 +859,6 @@ export default function ProjectModuleDetailPage() {
                     onChange={handleFileSelect}
                     className="block w-full text-sm text-muted-foreground file:mr-2 file:rounded file:border file:bg-background file:px-2 file:py-1"
                   />
-                  {taskAttachments.length > 0 && (
-                    <ul className="text-xs space-y-1">
-                      {taskAttachments.map((f, i) => (
-                        <li key={`${f.name}-${i}`} className="flex items-center justify-between gap-2">
-                          <span className="truncate">{f.name}</span>
-                          <button
-                            type="button"
-                            className="text-destructive shrink-0"
-                            onClick={() =>
-                              setTaskAttachments((prev) => prev.filter((_, idx) => idx !== i))
-                            }
-                          >
-                            Remove
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
                 </div>
                 <div className="col-span-2 space-y-2">
                   <label className="block text-sm mb-1">Extra links (saved as attachments)</label>
@@ -756,40 +870,15 @@ export default function ProjectModuleDetailPage() {
                       placeholder="https://…"
                       className="flex-1 px-4 py-2 border border-input rounded-lg bg-background"
                     />
-                    <Button type="button" size="sm" variant="outline" onClick={handleAddLink}>
+                    <Button type="button" size="sm" variant="outline" onClick={handleAddCreateLink}>
                       Add
                     </Button>
                   </div>
-                  {taskLinks.length > 0 && (
-                    <ul className="text-xs space-y-1 break-all">
-                      {taskLinks.map((u, i) => (
-                        <li key={u + i} className="flex items-start justify-between gap-2">
-                          <span>{u}</span>
-                          <button
-                            type="button"
-                            className="text-destructive shrink-0"
-                            onClick={() => setTaskLinks((prev) => prev.filter((_, idx) => idx !== i))}
-                          >
-                            Remove
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
                 </div>
               </div>
               </div>
               <div className="flex shrink-0 justify-end gap-2 border-t border-border bg-card px-6 py-4">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => {
-                    setShowCreateTaskModal(false)
-                    setTaskAttachments([])
-                    setTaskLinks([])
-                    setNewLink('')
-                  }}
-                >
+                <Button type="button" variant="outline" onClick={closeCreateTaskModal}>
                   Cancel
                 </Button>
                 <Button type="submit" disabled={creatingTask || !newTask.title.trim()}>
@@ -809,8 +898,7 @@ export default function ProjectModuleDetailPage() {
                 type="button"
                 onClick={() => {
                   setShowEditTaskModal(false)
-                  setEditTaskAttachments([])
-                  setEditTaskLinks([])
+                  setEditAttachmentList([])
                   setEditNewLink('')
                 }}
                 className="text-muted-foreground hover:text-foreground"
@@ -832,12 +920,14 @@ export default function ProjectModuleDetailPage() {
                 </div>
                 <div className="col-span-2">
                   <label className="block text-sm mb-2">Description</label>
-                  <textarea
-                    value={editTask.description}
-                    onChange={(e) => setEditTask({ ...editTask, description: e.target.value })}
-                    className="w-full px-4 py-2 border border-input rounded-lg bg-background"
-                    rows={3}
-                  />
+                  {editingTaskId ? (
+                    <TaskRichEditor
+                      key={editingTaskId}
+                      content={editTask.description}
+                      onChange={(html) => setEditTask({ ...editTask, description: html })}
+                      uploadImage={uploadEditorImageEdit}
+                    />
+                  ) : null}
                 </div>
                 <div>
                   <label className="block text-sm mb-2">Sprint</label>
@@ -920,7 +1010,14 @@ export default function ProjectModuleDetailPage() {
                   />
                 </div>
                 <div className="col-span-2 space-y-2">
-                  <label className="block text-sm mb-1">Add attachments (images or PDF)</label>
+                  <label className="block text-sm mb-1">Attachments (images or PDF)</label>
+                  <TaskAttachmentGallery
+                    items={editAttachmentList}
+                    onRemove={async (id) => {
+                      await removeAttachmentById(id)
+                      setEditAttachmentList((prev) => prev.filter((a) => a.id !== id))
+                    }}
+                  />
                   <input
                     type="file"
                     accept={TASK_ATTACHMENT_ACCEPT}
@@ -928,24 +1025,6 @@ export default function ProjectModuleDetailPage() {
                     onChange={handleEditFileSelect}
                     className="block w-full text-sm text-muted-foreground file:mr-2 file:rounded file:border file:bg-background file:px-2 file:py-1"
                   />
-                  {editTaskAttachments.length > 0 && (
-                    <ul className="text-xs space-y-1">
-                      {editTaskAttachments.map((f, i) => (
-                        <li key={`${f.name}-e-${i}`} className="flex items-center justify-between gap-2">
-                          <span className="truncate">{f.name}</span>
-                          <button
-                            type="button"
-                            className="text-destructive shrink-0"
-                            onClick={() =>
-                              setEditTaskAttachments((prev) => prev.filter((_, idx) => idx !== i))
-                            }
-                          >
-                            Remove
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
                 </div>
                 <div className="col-span-2 space-y-2">
                   <label className="block text-sm mb-1">Add links</label>
@@ -957,38 +1036,10 @@ export default function ProjectModuleDetailPage() {
                       placeholder="https://…"
                       className="flex-1 px-4 py-2 border border-input rounded-lg bg-background"
                     />
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        const url = editNewLink.trim()
-                        if (!url) return
-                        setEditTaskLinks((prev) => [...prev, url])
-                        setEditNewLink('')
-                      }}
-                    >
+                    <Button type="button" size="sm" variant="outline" onClick={handleAddEditLink}>
                       Add
                     </Button>
                   </div>
-                  {editTaskLinks.length > 0 && (
-                    <ul className="text-xs space-y-1 break-all">
-                      {editTaskLinks.map((u, i) => (
-                        <li key={u + i} className="flex items-start justify-between gap-2">
-                          <span>{u}</span>
-                          <button
-                            type="button"
-                            className="text-destructive shrink-0"
-                            onClick={() =>
-                              setEditTaskLinks((prev) => prev.filter((_, idx) => idx !== i))
-                            }
-                          >
-                            Remove
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
                 </div>
               </div>
               </div>
@@ -998,8 +1049,7 @@ export default function ProjectModuleDetailPage() {
                   variant="outline"
                   onClick={() => {
                     setShowEditTaskModal(false)
-                    setEditTaskAttachments([])
-                    setEditTaskLinks([])
+                    setEditAttachmentList([])
                     setEditNewLink('')
                   }}
                 >
